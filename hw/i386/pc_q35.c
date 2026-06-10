@@ -40,6 +40,7 @@
 #include "hw/i386/kvm/clock.h"
 #include "hw/pci-host/q35.h"
 #include "hw/pci/pcie_port.h"
+#include "hw/pci-bridge/adl_n_root_port.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/i386/x86.h"
 #include "hw/i386/pc.h"
@@ -62,6 +63,7 @@
 #include "hw/uefi/var-service-api.h"
 #include "hw/i386/acpi-build.h"
 #include "target/i386/cpu.h"
+#include "monitor/qdev.h"
 
 /* ICH9 AHCI has 6 ports */
 #define MAX_SATA_PORTS     6
@@ -80,6 +82,17 @@ struct ehci_companions {
     int port;
 };
 
+typedef struct ADLNRootPortDef {
+    const char *type;
+    const char *id;
+    uint8_t slot;
+    uint8_t func;
+    uint8_t port;
+    uint8_t chassis;
+    uint16_t pcie_slot;
+    bool multifunction;
+} ADLNRootPortDef;
+
 static const struct ehci_companions ich9_1d[] = {
     { .name = TYPE_ICH9_USB_UHCI(1), .func = 0, .port = 0 },
     { .name = TYPE_ICH9_USB_UHCI(2), .func = 1, .port = 2 },
@@ -91,6 +104,101 @@ static const struct ehci_companions ich9_1a[] = {
     { .name = TYPE_ICH9_USB_UHCI(5), .func = 1, .port = 2 },
     { .name = TYPE_ICH9_USB_UHCI(6), .func = 2, .port = 4 },
 };
+
+static const ADLNRootPortDef adl_n_root_ports[] = {
+    {
+        .type = TYPE_ADL_N_PCIE_ROOT_PORT_1C0,
+        .id = "pcie.00.1c.0",
+        .slot = 0x1c,
+        .func = 0,
+        .port = 0,
+        .chassis = 1,
+        .pcie_slot = 1,
+        .multifunction = true,
+    }, {
+        .type = TYPE_ADL_N_PCIE_ROOT_PORT_1C1,
+        .id = "pcie.00.1c.1",
+        .slot = 0x1c,
+        .func = 1,
+        .port = 1,
+        .chassis = 2,
+        .pcie_slot = 2,
+    }, {
+        .type = TYPE_ADL_N_PCIE_ROOT_PORT_1C2,
+        .id = "pcie.00.1c.2",
+        .slot = 0x1c,
+        .func = 2,
+        .port = 2,
+        .chassis = 3,
+        .pcie_slot = 3,
+    }, {
+        .type = TYPE_ADL_N_PCIE_ROOT_PORT_1C3,
+        .id = "pcie.00.1c.3",
+        .slot = 0x1c,
+        .func = 3,
+        .port = 3,
+        .chassis = 4,
+        .pcie_slot = 4,
+    }, {
+        .type = TYPE_ADL_N_PCIE_ROOT_PORT_1C6,
+        .id = "pcie.00.1c.6",
+        .slot = 0x1c,
+        .func = 6,
+        .port = 6,
+        .chassis = 5,
+        .pcie_slot = 5,
+    }, {
+        .type = TYPE_ADL_N_PCIE_ROOT_PORT_1D0,
+        .id = "pcie.00.1d.0",
+        .slot = 0x1d,
+        .func = 0,
+        .port = 8,
+        .chassis = 6,
+        .pcie_slot = 6,
+        .multifunction = true,
+    }, {
+        .type = TYPE_ADL_N_PCIE_ROOT_PORT_1D2,
+        .id = "pcie.00.1d.2",
+        .slot = 0x1d,
+        .func = 2,
+        .port = 10,
+        .chassis = 7,
+        .pcie_slot = 7,
+    }, {
+        .type = TYPE_ADL_N_PCIE_ROOT_PORT_1D3,
+        .id = "pcie.00.1d.3",
+        .slot = 0x1d,
+        .func = 3,
+        .port = 11,
+        .chassis = 8,
+        .pcie_slot = 8,
+    },
+};
+
+static void pc_q35_create_adl_n_root_ports(PCMachineState *pcms)
+{
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(adl_n_root_ports); i++) {
+        const ADLNRootPortDef *def = &adl_n_root_ports[i];
+        PCIDevice *rp;
+        DeviceState *dev;
+
+        if (def->multifunction) {
+            rp = pci_new_multifunction(PCI_DEVFN(def->slot, def->func),
+                                       def->type);
+        } else {
+            rp = pci_new(PCI_DEVFN(def->slot, def->func), def->type);
+        }
+
+        dev = DEVICE(rp);
+        qdev_set_id(dev, g_strdup(def->id), &error_fatal);
+        qdev_prop_set_uint8(dev, "port", def->port);
+        qdev_prop_set_uint8(dev, "chassis", def->chassis);
+        qdev_prop_set_uint16(dev, "slot", def->pcie_slot);
+        pci_realize_and_unref(rp, pcms->pcibus, &error_fatal);
+    }
+}
 
 static int ehci_create_ich9_with_companions(PCIBus *bus, int slot)
 {
@@ -230,6 +338,12 @@ static void pc_q35_init(MachineState *machine)
     /* pci */
     pcms->pcibus = PCI_BUS(qdev_get_child_bus(DEVICE(phb), "pcie.0"));
 
+    if (pcmc->adl_n_root_ports && machine_usb(machine)) {
+        error_report("adl-n machine does not support q35 legacy USB: "
+                     "ADL-N root ports occupy PCI slot 00:1d");
+        exit(1);
+    }
+
     /* irq lines */
     gsi_state = pc_gsi_create(&x86ms->gsi, true);
 
@@ -266,6 +380,10 @@ static void pc_q35_init(MachineState *machine)
         object_register_sugar_prop(TYPE_PCIE_SLOT,
                                    "x-do-not-expose-native-hotplug-cap",
                                    "true", true);
+    }
+
+    if (pcmc->adl_n_root_ports) {
+        pc_q35_create_adl_n_root_ports(pcms);
     }
 
     isa_bus = ISA_BUS(qdev_get_child_bus(lpc_dev, "isa.0"));
@@ -363,6 +481,17 @@ static void pc_q35_machine_options(MachineClass *m)
     compat_props_add(m->compat_props,
                      pc_q35_compat_defaults, pc_q35_compat_defaults_len);
 }
+
+static void pc_adl_n_machine_options(MachineClass *m)
+{
+    PCMachineClass *pcmc = PC_MACHINE_CLASS(m);
+
+    pc_q35_machine_options(m);
+    m->desc = "Alder Lake-N topology PC (Q35 + ADL-N root ports)";
+    pcmc->adl_n_root_ports = true;
+}
+
+DEFINE_PC_MACHINE(adl_n, "adl-n", pc_q35_init, pc_adl_n_machine_options);
 
 static void pc_q35_machine_11_0_options(MachineClass *m)
 {

@@ -10,7 +10,7 @@
 
 - 让 QEMU 可以创建一组带 Intel Alder Lake-N PCH Root Port PCI ID 的 PCIe bridge。
 - 让 `lspci -nn` 中的 root-port bridge 层显示为 Intel ID，而不是默认的 Red Hat `pcie-root-port` ID。
-- 让命令行可以把这些 root port 固定放在 `00:1c.0`、`00:1c.1`、`00:1c.2`、`00:1c.3`、`00:1c.6`、`00:1d.0`、`00:1d.2`、`00:1d.3`。
+- 让命令行可以通过 `-machine adl-n` 自动创建这些 root port，并固定放在 `00:1c.0`、`00:1c.1`、`00:1c.2`、`00:1c.3`、`00:1c.6`、`00:1d.0`、`00:1d.2`、`00:1d.3`。
 - 让 NVMe endpoint 可以挂在指定 root port 下，得到类似 `+-1d.0-[06]----00.0` 的树形结构。
 - 复用 QEMU 现有 PCIe Root Port 实现，包括 bridge window、secondary bus、slot、AER、ACS 和 MSI-X。
 
@@ -50,7 +50,7 @@
 00:1d.3  8086:54b3
 ```
 
-当前实现优先复刻 root port 位置和 root port PCI ID。NVMe endpoint 的 vendor/device ID 仍是 QEMU NVMe 默认值，后续可以继续扩展。
+当前实现优先复刻 root port 位置和 root port PCI ID。`adl-n` machine 会自动创建这些 root port，并使用 `pcie.00.<slot>.<func>` 形式的完整点式 BDF 作为 secondary bus 名。NVMe endpoint 的 vendor/device ID 仍是 QEMU NVMe 默认值，后续可以继续扩展。
 
 ## QEMU PCIe Bridge 相关代码
 
@@ -65,7 +65,10 @@ hw/pci-bridge/pcie_root_port.c
 hw/pci-bridge/gen_pcie_root_port.c
 hw/pci-bridge/ioh3420.c
 hw/pci-bridge/adl_n_root_port.c
+include/hw/pci-bridge/adl_n_root_port.h
 hw/pci-bridge/meson.build
+hw/i386/pc_q35.c
+include/hw/i386/pc.h
 ```
 
 核心职责：
@@ -76,6 +79,9 @@ hw/pci-bridge/meson.build
 - `hw/pci-bridge/gen_pcie_root_port.c` 是默认 `pcie-root-port` 设备，vendor/device ID 是 QEMU/Red Hat 风格。
 - `hw/pci-bridge/ioh3420.c` 是一个 Intel root port 的历史样例，适合参考“只改 class 参数”的写法。
 - `hw/pci-bridge/adl_n_root_port.c` 是本次新增的 Alder Lake-N root port 外观层。
+- `include/hw/pci-bridge/adl_n_root_port.h` 暴露这些 root port 的 QOM type 名称，供 machine 自动创建时复用。
+- `hw/i386/pc_q35.c` 注册 `adl-n` machine，并在 q35 root bus 创建后自动挂载这组 root port。
+- `include/hw/i386/pc.h` 在 `PCMachineClass` 中增加内部标志，用于区分普通 q35 和 `adl-n` machine。
 
 不要在 `adl_n_root_port.c` 里重新实现 bridge window 或 secondary bus。这些由 `TYPE_PCIE_ROOT_PORT` 及其父类完成。新增文件只负责定义不同 QOM type 的可见 PCI 身份。
 
@@ -106,9 +112,12 @@ hw/pci-bridge/meson.build
 
 ```text
 hw/pci-bridge/adl_n_root_port.c
+include/hw/pci-bridge/adl_n_root_port.h
+hw/i386/pc_q35.c
+include/hw/i386/pc.h
 ```
 
-该文件定义 8 个 QOM 设备类型：
+`adl_n_root_port.c` 定义 8 个 QOM 设备类型：
 
 ```text
 adl-n-pcie-root-port-1c0
@@ -120,6 +129,8 @@ adl-n-pcie-root-port-1d0
 adl-n-pcie-root-port-1d2
 adl-n-pcie-root-port-1d3
 ```
+
+这些类型名称同时在 `include/hw/pci-bridge/adl_n_root_port.h` 中声明，供 `pc_q35.c` 自动创建 root port 时使用。
 
 这些类型都继承：
 
@@ -345,6 +356,12 @@ strings ./qemu-system-x86_64.exe | grep adl-n-pcie-root-port
 ./qemu-system-x86_64.exe -device help | grep adl-n
 ```
 
+确认 machine help 能列出 `adl-n` machine：
+
+```sh
+./qemu-system-x86_64.exe -machine help | grep adl-n
+```
+
 期望输出包含：
 
 ```text
@@ -364,67 +381,69 @@ adl-n-pcie-root-port-1d3
 
 ## 命令行 Root Port 拓扑
 
-Root port 固定拓扑：
+推荐使用专用 machine 自动创建 root port：
 
 ```sh
--device adl-n-pcie-root-port-1c0,id=rp01,bus=pcie.0,addr=1c.0,multifunction=on,port=0,chassis=1,slot=1 \
--device adl-n-pcie-root-port-1c1,id=rp02,bus=pcie.0,addr=1c.1,port=1,chassis=2,slot=2 \
--device adl-n-pcie-root-port-1c2,id=rp03,bus=pcie.0,addr=1c.2,port=2,chassis=3,slot=3 \
--device adl-n-pcie-root-port-1c3,id=rp04,bus=pcie.0,addr=1c.3,port=3,chassis=4,slot=4 \
--device adl-n-pcie-root-port-1c6,id=rp05,bus=pcie.0,addr=1c.6,port=6,chassis=5,slot=5 \
--device adl-n-pcie-root-port-1d0,id=rp06,bus=pcie.0,addr=1d.0,multifunction=on,port=8,chassis=6,slot=6 \
--device adl-n-pcie-root-port-1d2,id=rp07,bus=pcie.0,addr=1d.2,port=10,chassis=7,slot=7 \
--device adl-n-pcie-root-port-1d3,id=rp08,bus=pcie.0,addr=1d.3,port=11,chassis=8,slot=8
+-machine adl-n
 ```
 
-字段解释：
+`adl-n` machine 基于 q35，在 `pcie.0` root bus 创建完成后自动创建以下 root port：
 
 ```text
-id=rp03          QEMU 对象 ID，同时作为该 root port 的 secondary bus 名
-bus=pcie.0       挂在 q35 root complex 的 PCIe root bus 上
-addr=1c.2        固定 root port 在 bus 0 的 slot/function
-multifunction=on 同一 slot 下存在多个 function 时，function 0 必须设置
-port=2           PCIe capability 中的 port number
-chassis=3        QEMU PCIe chassis 编号
-slot=3           QEMU PCIe physical slot 编号
+pcie.00.1c.0  00:1c.0  adl-n-pcie-root-port-1c0  port=0   chassis=1  slot=1
+pcie.00.1c.1  00:1c.1  adl-n-pcie-root-port-1c1  port=1   chassis=2  slot=2
+pcie.00.1c.2  00:1c.2  adl-n-pcie-root-port-1c2  port=2   chassis=3  slot=3
+pcie.00.1c.3  00:1c.3  adl-n-pcie-root-port-1c3  port=3   chassis=4  slot=4
+pcie.00.1c.6  00:1c.6  adl-n-pcie-root-port-1c6  port=6   chassis=5  slot=5
+pcie.00.1d.0  00:1d.0  adl-n-pcie-root-port-1d0  port=8   chassis=6  slot=6
+pcie.00.1d.2  00:1d.2  adl-n-pcie-root-port-1d2  port=10  chassis=7  slot=7
+pcie.00.1d.3  00:1d.3  adl-n-pcie-root-port-1d3  port=11  chassis=8  slot=8
 ```
 
-`multifunction=on` 必须放在同一 slot 的 function 0 上。这里 `1c.0` 和 `1d.0` 是 function 0，所以它们需要该属性。`1c.1`、`1c.2`、`1c.3`、`1c.6`、`1d.2`、`1d.3` 不需要重复设置。
+这里的 `pcie.00.*.*` 名称是 QEMU 设备 ID，同时也是对应 root port 的 secondary bus 名。endpoint 继续使用：
+
+```text
+bus=<root-port-bdf-name>,addr=0.0
+```
+
+例如 `bus=pcie.00.1d.0` 表示把 endpoint 挂到 guest 里的 `00:1d.0` root port 后面。这里的 `00` 是 root port 所在的 guest PCI bus number，不是该 root port 后面的 secondary bus number。
+
+手动创建 root port 的长命令行仍可用于调试，但日常启动建议使用 `-machine adl-n`，避免重复维护 `addr`、`port`、`chassis`、`slot` 和 `multifunction` 参数。
 
 ## NVMe 挂载关系
 
-QEMU 的 root port `id` 同时也是该 root port 的 secondary bus 名。把 endpoint 挂到某个 root port 下时，使用：
+QEMU 的 root port `id` 同时也是该 root port 的 secondary bus 名。`adl-n` machine 使用完整点式 BDF 作为 root port bus 名。把 endpoint 挂到某个 root port 下时，使用：
 
 ```text
-bus=<root-port-id>,addr=0.0
+bus=pcie.<bus>.<slot>.<function>,addr=0.0
 ```
 
 推荐盘位关系：
 
 ```text
-1c.2 -> rp03 -> nvm_1c2
-1c.3 -> rp04 -> nvm_1c3
-1c.6 -> rp05 -> nvm_1c6
-1d.0 -> rp06 -> nvm_sys  系统盘
-1d.2 -> rp07 -> nvm_1d2
-1d.3 -> rp08 -> nvm_1d3
+1c.2 -> pcie.00.1c.2 -> nvm_1c2
+1c.3 -> pcie.00.1c.3 -> nvm_1c3
+1c.6 -> pcie.00.1c.6 -> nvm_1c6
+1d.0 -> pcie.00.1d.0 -> nvm_sys  系统盘
+1d.2 -> pcie.00.1d.2 -> nvm_1d2
+1d.3 -> pcie.00.1d.3 -> nvm_1d3
 ```
 
 命令行片段：
 
 ```sh
 -drive file=/d/vm/qemu_fnos/nvme_1c2.img,format=raw,if=none,id=nvm_1c2 \
--device nvme,serial=nvm00000001,drive=nvm_1c2,bus=rp03,addr=0.0 \
+-device nvme,serial=nvm00000001,drive=nvm_1c2,bus=pcie.00.1c.2,addr=0.0 \
 -drive file=/d/vm/qemu_fnos/nvme_1c3.img,format=raw,if=none,id=nvm_1c3 \
--device nvme,serial=nvm00000002,drive=nvm_1c3,bus=rp04,addr=0.0 \
+-device nvme,serial=nvm00000002,drive=nvm_1c3,bus=pcie.00.1c.3,addr=0.0 \
 -drive file=/d/vm/qemu_fnos/nvme_1c6.img,format=raw,if=none,id=nvm_1c6 \
--device nvme,serial=nvm00000003,drive=nvm_1c6,bus=rp05,addr=0.0 \
+-device nvme,serial=nvm00000003,drive=nvm_1c6,bus=pcie.00.1c.6,addr=0.0 \
 -drive file=/d/vm/qemu_fnos/sys.qcow2,format=qcow2,if=none,id=nvm_sys \
--device nvme,serial=nvm00000004,drive=nvm_sys,bus=rp06,addr=0.0,bootindex=1 \
+-device nvme,serial=nvm00000004,drive=nvm_sys,bus=pcie.00.1d.0,addr=0.0,bootindex=1 \
 -drive file=/d/vm/qemu_fnos/nvme_1d2.img,format=raw,if=none,id=nvm_1d2 \
--device nvme,serial=nvm00000005,drive=nvm_1d2,bus=rp07,addr=0.0 \
+-device nvme,serial=nvm00000005,drive=nvm_1d2,bus=pcie.00.1d.2,addr=0.0 \
 -drive file=/d/vm/qemu_fnos/nvme_1d3.img,format=raw,if=none,id=nvm_1d3 \
--device nvme,serial=nvm00000006,drive=nvm_1d3,bus=rp08,addr=0.0
+-device nvme,serial=nvm00000006,drive=nvm_1d3,bus=pcie.00.1d.3,addr=0.0
 ```
 
 系统盘放在 `1d.0-[06]` 下时，应给对应 NVMe device 加：
@@ -452,8 +471,8 @@ bootindex=1
 
 需要注意：
 
-- QEMU 命令行中的 `id=rp03` 不是 guest 看到的 bus number。
-- `bus=rp03` 表示把 endpoint 挂到该 root port 的 secondary bus 上。
+- QEMU 命令行中的 `pcie.00.1c.2` 是 root port 的位置命名，不是 guest 看到的 secondary bus number。
+- `bus=pcie.00.1c.2` 表示把 endpoint 挂到 `00:1c.2` 这个 root port 的 secondary bus 上。
 - guest 里最终显示 `[03]` 还是 `[04]` 取决于固件分配。
 - 若加入额外 PCIe 设备，bus number 可能变化。
 
@@ -465,23 +484,15 @@ SeaBIOS 启动示例，系统盘挂在 `1d.0` 下：
 
 ```sh
 ./build/qemu-system-x86_64.exe \
-  -machine q35 \
+  -machine adl-n \
   -m 2048 \
   -smp 4,sockets=1,cores=4,threads=1 \
   -cpu Skylake-Client-noTSX-IBRS \
   -boot order=c \
   -accel whpx \
   -vga virtio \
-  -device adl-n-pcie-root-port-1c0,id=rp01,bus=pcie.0,addr=1c.0,multifunction=on,port=0,chassis=1,slot=1 \
-  -device adl-n-pcie-root-port-1c1,id=rp02,bus=pcie.0,addr=1c.1,port=1,chassis=2,slot=2 \
-  -device adl-n-pcie-root-port-1c2,id=rp03,bus=pcie.0,addr=1c.2,port=2,chassis=3,slot=3 \
-  -device adl-n-pcie-root-port-1c3,id=rp04,bus=pcie.0,addr=1c.3,port=3,chassis=4,slot=4 \
-  -device adl-n-pcie-root-port-1c6,id=rp05,bus=pcie.0,addr=1c.6,port=6,chassis=5,slot=5 \
-  -device adl-n-pcie-root-port-1d0,id=rp06,bus=pcie.0,addr=1d.0,multifunction=on,port=8,chassis=6,slot=6 \
-  -device adl-n-pcie-root-port-1d2,id=rp07,bus=pcie.0,addr=1d.2,port=10,chassis=7,slot=7 \
-  -device adl-n-pcie-root-port-1d3,id=rp08,bus=pcie.0,addr=1d.3,port=11,chassis=8,slot=8 \
   -drive file=/d/vm/qemu_fnos/sys.qcow2,format=qcow2,if=none,id=nvm_sys \
-  -device nvme,serial=nvm00000004,drive=nvm_sys,bus=rp06,addr=0.0,bootindex=1 \
+  -device nvme,serial=nvm00000004,drive=nvm_sys,bus=pcie.00.1d.0,addr=0.0,bootindex=1 \
   -device e1000,netdev=net0 \
   -netdev user,id=net0,hostfwd=tcp::5666-:5666,hostfwd=tcp::2222-:22
 ```
@@ -532,7 +543,7 @@ UEFI 完整示例：
 
 ```sh
 ./build/qemu-system-x86_64.exe \
-  -machine q35 \
+  -machine adl-n \
   -drive if=pflash,format=raw,unit=0,readonly=on,file=./build/pc-bios/edk2-x86_64-code.fd \
   -drive if=pflash,format=raw,unit=1,file=/d/vm/qemu_fnos/OVMF_VARS.fd \
   -m 2048 \
@@ -541,16 +552,8 @@ UEFI 完整示例：
   -boot order=c \
   -accel whpx \
   -vga virtio \
-  -device adl-n-pcie-root-port-1c0,id=rp01,bus=pcie.0,addr=1c.0,multifunction=on,port=0,chassis=1,slot=1 \
-  -device adl-n-pcie-root-port-1c1,id=rp02,bus=pcie.0,addr=1c.1,port=1,chassis=2,slot=2 \
-  -device adl-n-pcie-root-port-1c2,id=rp03,bus=pcie.0,addr=1c.2,port=2,chassis=3,slot=3 \
-  -device adl-n-pcie-root-port-1c3,id=rp04,bus=pcie.0,addr=1c.3,port=3,chassis=4,slot=4 \
-  -device adl-n-pcie-root-port-1c6,id=rp05,bus=pcie.0,addr=1c.6,port=6,chassis=5,slot=5 \
-  -device adl-n-pcie-root-port-1d0,id=rp06,bus=pcie.0,addr=1d.0,multifunction=on,port=8,chassis=6,slot=6 \
-  -device adl-n-pcie-root-port-1d2,id=rp07,bus=pcie.0,addr=1d.2,port=10,chassis=7,slot=7 \
-  -device adl-n-pcie-root-port-1d3,id=rp08,bus=pcie.0,addr=1d.3,port=11,chassis=8,slot=8 \
   -drive file=/d/vm/qemu_fnos/sys.qcow2,format=qcow2,if=none,id=nvm_sys \
-  -device nvme,serial=nvm00000004,drive=nvm_sys,bus=rp06,addr=0.0,bootindex=1 \
+  -device nvme,serial=nvm00000004,drive=nvm_sys,bus=pcie.00.1d.0,addr=0.0,bootindex=1 \
   -device e1000,netdev=net0 \
   -netdev user,id=net0,hostfwd=tcp::5666-:5666,hostfwd=tcp::2222-:22
 ```
@@ -628,26 +631,36 @@ meson setup --reconfigure . ..
 ninja qemu-system-x86_64.exe
 ```
 
-### Root port function 冲突
+### adl-n machine 未出现
 
-如果在 `1c.1`、`1c.2` 等 function 上创建设备时报 multifunction 相关错误，检查 function 0：
+如果 `-machine adl-n` 报无效 machine，说明当前运行的 exe 还没有编进新的 machine type。
 
-```sh
--device adl-n-pcie-root-port-1c0,...,addr=1c.0,multifunction=on
-```
-
-同理 `1d.0` 也需要：
+检查：
 
 ```sh
--device adl-n-pcie-root-port-1d0,...,addr=1d.0,multifunction=on
+./build/qemu-system-x86_64.exe -machine help | grep adl-n
 ```
+
+没有输出就重新编译 `qemu-system-x86_64.exe`。
+
+### q35 USB 冲突
+
+`adl-n` machine 自动占用 `00:1d.0`、`00:1d.2`、`00:1d.3`。q35 传统 USB 也会使用 `00:1d.*`，所以 `adl-n` machine 不支持同时启用 q35 legacy USB。
+
+如果看到：
+
+```text
+adl-n machine does not support q35 legacy USB
+```
+
+去掉显式 `-usb` 或改用其它不占用 `00:1d.*` 的 USB 控制器方案。
 
 ### NVMe 不作为系统盘启动
 
-如果系统盘挂在 `rp06`，确保：
+如果系统盘挂在 `pcie.00.1d.0`，确保：
 
 ```sh
--device nvme,serial=nvm00000004,drive=nvm_sys,bus=rp06,addr=0.0,bootindex=1
+-device nvme,serial=nvm00000004,drive=nvm_sys,bus=pcie.00.1d.0,addr=0.0,bootindex=1
 ```
 
 并且安装完成后不要继续使用：
@@ -819,41 +832,34 @@ maxio-map1202-nvme
 - 如果 guest 需要功能，例如 xHCI、HDA、SMBus，应优先复用 QEMU 已有功能设备，再调整 PCI ID。
 - 如果只是为了安装/启动某个系统，先不要补太多 dummy 设备，避免驱动绑定后访问未实现寄存器导致异常。
 
-## 是否要做专用 Machine
+## 专用 Machine
 
-当前命令行很长，适合调试，但不适合长期使用。
-
-后续可以新增一个专用 machine 或 machine 属性，例如：
+当前已新增专用 machine：
 
 ```text
--machine q35,adl-n-topology=on
+-machine adl-n
 ```
 
-实现位置可考虑：
+`adl-n` 复用 q35 初始化流程，并通过 `PCMachineClass::adl_n_root_ports` 标记自动创建 Alder Lake-N root ports。实现位置：
 
 ```text
+include/hw/i386/pc.h
 hw/i386/pc_q35.c
 ```
 
-在 q35 host bridge 和 root bus 创建完成后，自动创建 root port：
+创建时机是在 q35 host bridge realize 后、`pcie.0` root bus 可用后：
 
 ```c
-PCIDevice *rp;
+pcms->pcibus = PCI_BUS(qdev_get_child_bus(DEVICE(phb), "pcie.0"));
 
-rp = pci_new_multifunction(PCI_DEVFN(0x1c, 0), "adl-n-pcie-root-port-1c0");
-qdev_prop_set_uint8(DEVICE(rp), "port", 0);
-qdev_prop_set_uint8(DEVICE(rp), "chassis", 1);
-qdev_prop_set_uint16(DEVICE(rp), "slot", 1);
-pci_realize_and_unref(rp, pcms->pcibus, &error_fatal);
+if (pcmc->adl_n_root_ports) {
+    pc_q35_create_adl_n_root_ports(pcms);
+}
 ```
 
-这样用户命令行只需要挂 endpoint。缺点是会污染 machine ABI，需要考虑版本兼容和默认开关。
+自动创建时使用 `pcie.00.<slot>.<func>` 作为设备 ID 和 secondary bus 名，因此 endpoint 命令行可使用 `bus=pcie.00.1c.2`、`bus=pcie.00.1d.0` 等写法。
 
-建议顺序：
-
-1. 先稳定当前命令行方案。
-2. 补齐 endpoint ID 复刻。
-3. 再决定是否新增 machine 自动创建拓扑。
+`adl-n` machine 会占用 `00:1d.*`，因此不支持 q35 legacy USB。若需要 USB，应后续选择不与 `00:1d.*` 冲突的控制器方案。
 
 ## 维护检查清单
 
@@ -862,6 +868,7 @@ pci_realize_and_unref(rp, pcms->pcibus, &error_fatal);
 ```sh
 meson setup --reconfigure . ..
 ninja qemu-system-x86_64.exe
+./qemu-system-x86_64.exe -machine help | grep adl-n
 ./qemu-system-x86_64.exe -device help | grep adl-n
 strings ./qemu-system-x86_64.exe | grep adl-n-pcie-root-port
 ```
