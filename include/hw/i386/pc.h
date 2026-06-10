@@ -89,6 +89,7 @@ struct PCMachineClass {
     /* Device configuration: */
     bool pci_enabled;
     const char *default_south_bridge;
+    bool adl_n_root_ports;
 
     /* Compat options: */
 
