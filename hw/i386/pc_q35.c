@@ -37,6 +37,7 @@
 #include "hw/rtc/mc146818rtc.h"
 #include "system/tcg.h"
 #include "system/kvm.h"
+#include "system/hax.h"
 #include "hw/i386/kvm/clock.h"
 #include "hw/pci-host/q35.h"
 #include "hw/pci/pcie_port.h"
@@ -147,6 +148,8 @@ static void pc_q35_init(MachineState *machine)
     MachineClass *mc = MACHINE_GET_CLASS(machine);
     bool acpi_pcihp;
     bool keep_pci_slot_hpc;
+    bool smm_enabled;
+    bool smm_ranges;
     uint64_t pci_hole64_size = 0;
 
     assert(pcmc->pci_enabled);
@@ -223,8 +226,15 @@ static void pc_q35_init(MachineState *machine)
                             x86ms->above_4g_mem_size, NULL);
     object_property_set_bool(phb, PCI_HOST_BYPASS_IOMMU,
                              pcms->default_bus_bypass_iommu, NULL);
+    smm_enabled = x86_machine_is_smm_enabled(x86ms);
+    /*
+     * HAX does not support SMM execution, but q35's low legacy PCI window is
+     * routed through smram-region.  Keep the range container so VGA legacy
+     * memory (0xa0000-0xbffff) can override RAM while leaving SMI disabled.
+     */
+    smm_ranges = smm_enabled || hax_enabled();
     object_property_set_bool(phb, PCI_HOST_PROP_SMM_RANGES,
-                             x86_machine_is_smm_enabled(x86ms), NULL);
+                             smm_ranges, NULL);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(phb), &error_fatal);
 
     /* pci */
@@ -237,8 +247,7 @@ static void pc_q35_init(MachineState *machine)
     lpc = pci_new_multifunction(PCI_DEVFN(ICH9_LPC_DEV, ICH9_LPC_FUNC),
                                 TYPE_ICH9_LPC_DEVICE);
     lpc_dev = DEVICE(lpc);
-    qdev_prop_set_bit(lpc_dev, "smm-enabled",
-                      x86_machine_is_smm_enabled(x86ms));
+    qdev_prop_set_bit(lpc_dev, "smm-enabled", smm_enabled);
     for (i = 0; i < IOAPIC_NUM_PINS; i++) {
         qdev_connect_gpio_out_named(lpc_dev, ICH9_GPIO_GSI, i, x86ms->gsi[i]);
     }

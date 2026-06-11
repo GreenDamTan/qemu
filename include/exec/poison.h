@@ -61,6 +61,7 @@
 #pragma GCC poison CONFIG_XTENSA_DIS
 
 #pragma GCC poison CONFIG_HVF
+#pragma GCC poison CONFIG_HAX
 #pragma GCC poison CONFIG_LINUX_USER
 #pragma GCC poison CONFIG_KVM
 #pragma GCC poison CONFIG_WHPX

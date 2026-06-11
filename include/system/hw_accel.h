@@ -12,6 +12,7 @@
 #define QEMU_HW_ACCEL_H
 
 #include "hw/core/cpu.h"
+#include "system/hax.h"
 #include "system/kvm.h"
 #include "system/hvf.h"
 #include "system/mshv.h"
@@ -49,6 +50,7 @@ void cpu_synchronize_post_init(CPUState *cpu);
 static inline bool hwaccel_enabled(void)
 {
     return hvf_enabled()
+        || hax_enabled()
         || kvm_enabled()
         || nvmm_enabled()
         || whpx_enabled();

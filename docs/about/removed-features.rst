@@ -1048,12 +1048,6 @@ MIPS "Trap-and-Emulate" KVM support (removed in 8.0)
 The MIPS "Trap-and-Emulate" KVM host and guest support was removed
 from Linux in 2021, and is not supported anymore by QEMU either.
 
-HAXM (``-accel hax``) (removed in 8.2)
-''''''''''''''''''''''''''''''''''''''
-
-The HAXM project has been retired (see https://github.com/intel/haxm#status).
-Use "whpx" (on Windows) or "hvf" (on macOS) instead.
-
 System emulator machines
 ------------------------
 

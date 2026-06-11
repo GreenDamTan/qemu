@@ -1,5 +1,6 @@
 stub_ss.add(files(
   'hvf-stub.c',
+  'hax-stub.c',
   'kvm-stub.c',
   'nitro-stub.c',
   'mshv-stub.c',
