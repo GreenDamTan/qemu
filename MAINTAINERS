@@ -546,6 +546,14 @@ F: cpu-target.c
 F: qapi/accelerator.json
 F: system/cpus.c
 
+Guest CPU Cores (HAXM)
+----------------------
+X86 HAXM CPUs
+S: Orphan
+F: accel/stubs/hax-stub.c
+F: include/system/hax.h
+F: target/i386/hax/
+
 Apple Silicon HVF CPUs
 M: Alexander Graf <agraf@csgraf.de>
 S: Maintained

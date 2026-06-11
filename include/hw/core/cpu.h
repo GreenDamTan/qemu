@@ -567,6 +567,7 @@ struct CPUState {
     uint32_t halted;
     int32_t exception_index;
 
+    /* shared by kvm, hax and hvf */
     bool vcpu_dirty;
     AccelCPUState *accel;
 
