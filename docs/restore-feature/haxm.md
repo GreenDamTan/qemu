@@ -398,6 +398,8 @@ HAXM (``-accel hax``) (removed in 8.2)
 #include "exec/cpu-common.h"
 #include "system/address-spaces.h"
 #include "hw/core/boards.h"
+#include "hw/i386/apic.h"
+#include "qemu/thread.h"
 ```
 
 原因：
@@ -406,6 +408,8 @@ HAXM (``-accel hax``) (removed in 8.2)
 - `exec/cpu-common.h` 提供 `cpu_physical_memory_read/write()` 声明。
 - `system/address-spaces.h` 提供 `address_space_memory` / `address_space_io`。
 - `hw/core/boards.h` 提供 `MachineState` 完整定义。
+- `hw/i386/apic.h` 提供 TPR access report 和 APIC base 同步所需接口。
+- `qemu/thread.h` 提供 HAX CPUID/run 串行化使用的 `QemuMutex`。
 
 `hax-mem.c` 当前需要：
 
@@ -482,6 +486,39 @@ bql_lock();
 - 当前 `CPUState.thread` 和 `CPUState.halt_cond` 已由 CPU core 初始化，HAX 的 `create_vcpu_thread` 不能重新分配这两个对象；否则 `qemu_cpu_kick()` 和 vCPU 线程等待可能使用不同的同步对象。
 - Windows 下旧 `qemu_wait_io_event()` 里的 `SleepEx(0, TRUE)` 需要移到 HAX vCPU loop 中，用来消费 `hax_kick_vcpu_thread()` 排队的 dummy APC。
 - 如果后续 QEMU 的 CPU thread loop 再变化，优先对照 `accel/whpx/whpx-accel-ops.c` 和 `accel/kvm/kvm-accel-ops.c`。
+
+### HAX SMP CPUID 适配
+
+现象：
+
+```text
+-accel hax -machine q35 \
+  -drive if=pflash,format=raw,unit=0,readonly=on,file=build/pc-bios/edk2-x86_64-code.fd \
+  -m 2048 -smp 4,sockets=1,cores=4,threads=1 \
+  -cpu Skylake-Client-noTSX-IBRS
+```
+
+1 或 2 vCPU 可以进入 OVMF/TianoCore，4 vCPU 或更多时图形窗口停在黑屏或固件占位画面。调试 OVMF MP mailbox 时可见 AP 已收到 INIT/SIPI，但后续卡在 MP 初始化或异常处理路径。
+
+原因：
+
+- HAXM 驱动内部只给 vCPU 0 分配 `guest_cpuid`，其它 vCPU 共享 vCPU 0 的 CPUID 缓冲。
+- CPUID leaf 1 的 `EBX[31:24]` 包含当前 vCPU 的 initial APIC ID，QEMU 为每个 vCPU 生成的值不同。
+- 多 vCPU 并发进入 HAXM 时，如果共享 CPUID 缓冲里保留了其它 vCPU 的 APIC ID/topology，固件 MP 初始化可能把 AP 识别错，进而挂在 OVMF 早期路径。
+
+当前处理：
+
+- 从 HAXM capability 中识别 `HAX_CAP_CPUID`。
+- 实现 `HAX_VCPU_IOCTL_SET_CPUID` 的 Windows/POSIX 平台入口。
+- 只下发 HAXM 驱动支持的 CPUID leaf：`0`、`1`、`2`、`7.0`、`7.1`、`0xa`、`0x15`、`0x16`、`0x40000000`、`0x80000000`、`0x80000001`、`0x80000002`、`0x80000003`、`0x80000004`、`0x80000006`、`0x80000008`。
+- 在每次进入 `hax_vcpu_run()` 前按当前 vCPU 刷新 CPUID，并用 `hax_cpuid_run_mutex` 把 `SET_CPUID` 和 `hax_vcpu_run()` 串行化，避免其它 vCPU 在本 vCPU 执行 CPUID 时改写共享缓冲。
+
+维护点：
+
+- 这会牺牲 HAXM SMP 并行度，但 HAXM 驱动的 CPUID 存储模型本身不是 per-vCPU；为了正确性需要接受这个限制。
+- 不要把所有 QEMU CPUID leaf 都传给 HAXM；旧 HAXM 驱动只会处理固定 leaf 集合。
+- 如果 HAXM 驱动不支持 `HAX_CAP_CPUID`，当前代码保持旧行为；这种驱动下 SMP topology 仍可能不正确。
+- 如果以后改动这段逻辑，至少要验证 OVMF q35 1、2、4 vCPU 都能显示 TianoCore/PXE 或进入 UEFI shell。
 
 ### fast MMIO 适配
 
@@ -1120,9 +1157,11 @@ build/qemu-system-x86_64.exe -accel help
 - `meson compile -C build` 通过。
 - `qemu-system-x86_64.exe` 和 `qemu-system-x86_64w.exe` 成功链接。
 - `-accel help` 输出包含 `hax`。
+- HAX q35 + OVMF + `Skylake-Client-noTSX-IBRS` 在 1、2、4 vCPU 下均可显示 TianoCore/PXE 画面。
+- HAX q35 + SeaBIOS + `qemu64` 仍可显示，`info mtree -f` 中 `0xa0000-0xbffff` 仍为 `vga-lowmem`，没有回退成 `pc.ram`。
 
 尚未验证：
 
 - 安装 HAXM 驱动后的真实 guest 启动。
-- 多 vCPU、APIC、SIPI、dirty logging、迁移等高级场景。
+- guest OS 内部的多 vCPU 压力、APIC、dirty logging、迁移等高级场景。
 - Darwin/NetBSD POSIX HAX 路径。

@@ -81,6 +81,8 @@ static inline int hax_invalid_fd(hax_fd fd)
                                               METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define HAX_VCPU_GET_REGS            CTL_CODE(HAX_DEVICE_TYPE, 0x90e, \
                                               METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define HAX_VCPU_IOCTL_SET_CPUID     CTL_CODE(HAX_DEVICE_TYPE, 0x917, \
+                                              METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 #define HAX_VM_IOCTL_NOTIFY_QEMU_VERSION CTL_CODE(HAX_DEVICE_TYPE, 0x910, \
                                                   METHOD_BUFFERED,        \
