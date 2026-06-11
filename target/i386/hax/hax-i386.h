@@ -42,6 +42,7 @@ struct hax_state {
     struct hax_vm *vm;
     uint64_t mem_quota;
     bool supports_64bit_ramblock;
+    bool supports_cpuid;
 };
 
 #define HAX_MAX_VCPU 0x10
@@ -69,6 +70,7 @@ int hax_sync_vcpu_state(CPUArchState *env, struct vcpu_state_t *state,
                         int set);
 int hax_sync_msr(CPUArchState *env, struct hax_msr_data *msrs, int set);
 int hax_sync_fpu(CPUArchState *env, struct fx_layout *fl, int set);
+int hax_set_cpuid(CPUArchState *env, struct hax_cpuid *cpuid);
 
 int hax_vm_destroy(struct hax_vm *vm);
 int hax_capability(struct hax_state *hax, struct hax_capabilityinfo *cap);

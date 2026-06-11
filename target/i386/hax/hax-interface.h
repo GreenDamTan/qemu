@@ -335,6 +335,7 @@ struct hax_set_ram_info {
 #define HAX_CAP_MEMQUOTA           0x2
 #define HAX_CAP_UG                 0x4
 #define HAX_CAP_64BIT_RAMBLOCK     0x8
+#define HAX_CAP_CPUID              0x200
 
 struct hax_capabilityinfo {
     /* bit 0: 1 - working
@@ -365,5 +366,24 @@ struct hax_fastmmio {
     uint64_t _cr2;
     uint64_t _cr3;
     uint64_t _cr4;
+} __attribute__ ((__packed__));
+
+#define HAX_MAX_CPUID_ENTRIES 0x40
+
+struct hax_cpuid_entry {
+    uint32_t function;
+    uint32_t index;
+    uint32_t flags;
+    uint32_t eax;
+    uint32_t ebx;
+    uint32_t ecx;
+    uint32_t edx;
+    uint32_t pad[3];
+} __attribute__ ((__packed__));
+
+struct hax_cpuid {
+    uint32_t total;
+    uint32_t pad;
+    struct hax_cpuid_entry entries[];
 } __attribute__ ((__packed__));
 #endif

@@ -282,6 +282,19 @@ int hax_sync_vcpu_state(CPUArchState *env, struct vcpu_state_t *state, int set)
     return ret;
 }
 
+int hax_set_cpuid(CPUArchState *env, struct hax_cpuid *cpuid)
+{
+    int ret, fd;
+
+    fd = hax_vcpu_get_fd(env);
+    if (fd <= 0) {
+        return -1;
+    }
+
+    ret = ioctl(fd, HAX_VCPU_IOCTL_SET_CPUID, &cpuid);
+    return ret;
+}
+
 int hax_inject_interrupt(CPUArchState *env, int vector)
 {
     int fd;

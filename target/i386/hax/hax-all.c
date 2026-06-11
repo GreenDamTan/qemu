@@ -33,6 +33,8 @@
 #include "system/reset.h"
 #include "system/runstate.h"
 #include "hw/core/boards.h"
+#include "hw/i386/apic.h"
+#include "qemu/thread.h"
 
 #include "hax-accel-ops.h"
 
@@ -56,6 +58,8 @@ struct hax_state hax_global;
 
 static void hax_vcpu_sync_state(CPUArchState *env, int modified);
 static int hax_arch_get_registers(CPUArchState *env);
+static int hax_vcpu_set_cpuid(CPUArchState *env);
+static QemuMutex hax_cpuid_run_mutex;
 
 int valid_hax_tunnel_size(uint16_t size)
 {
@@ -99,6 +103,7 @@ static int hax_get_capability(struct hax_state *hax)
     }
 
     hax->supports_64bit_ramblock = !!(cap->winfo & HAX_CAP_64BIT_RAMBLOCK);
+    hax->supports_cpuid = !!(cap->winfo & HAX_CAP_CPUID);
 
     if (cap->wstatus & HAX_CAP_MEMQUOTA) {
         if (cap->mem_quota < hax->mem_quota) {
@@ -226,10 +231,110 @@ int hax_init_vcpu(CPUState *cpu)
     }
 
     cpu->accel = hax_global.vm->vcpus[cpu->cpu_index];
+
+    ret = hax_vcpu_set_cpuid(cpu_env(cpu));
+    if (ret < 0) {
+        fprintf(stderr, "Failed to set HAX CPUID for vcpu %d\n",
+                cpu->cpu_index);
+        exit(-1);
+    }
+
     cpu->vcpu_dirty = true;
     qemu_register_reset(hax_reset_vcpu_state, cpu_env(cpu));
 
     return ret;
+}
+
+static struct hax_cpuid_entry *hax_cpuid_add_entry(struct hax_cpuid *cpuid,
+                                                   uint32_t *cpuid_i,
+                                                   uint32_t function,
+                                                   uint32_t index)
+{
+    struct hax_cpuid_entry *entry;
+
+    if (*cpuid_i == HAX_MAX_CPUID_ENTRIES) {
+        fprintf(stderr, "HAX CPUID table is full, no space for "
+                "cpuid(eax:0x%x,ecx:0x%x)\n", function, index);
+        abort();
+    }
+
+    entry = &cpuid->entries[(*cpuid_i)++];
+    memset(entry, 0, sizeof(*entry));
+    entry->function = function;
+    entry->index = index;
+    return entry;
+}
+
+static void hax_cpuid_drop_empty(struct hax_cpuid_entry *entry,
+                                 uint32_t *cpuid_i)
+{
+    if (!entry->eax && !entry->ebx && !entry->ecx && !entry->edx) {
+        (*cpuid_i)--;
+    }
+}
+
+static void hax_cpuid(CPUArchState *env, uint32_t function, uint32_t index,
+                      struct hax_cpuid_entry *entry)
+{
+    uint32_t eax, ebx, ecx, edx;
+
+    cpu_x86_cpuid(env, function, index, &eax, &ebx, &ecx, &edx);
+    entry->eax = eax;
+    entry->ebx = ebx;
+    entry->ecx = ecx;
+    entry->edx = edx;
+}
+
+static void hax_cpuid_add(CPUArchState *env, struct hax_cpuid *cpuid,
+                          uint32_t *cpuid_i, uint32_t function,
+                          uint32_t index)
+{
+    struct hax_cpuid_entry *entry;
+
+    entry = hax_cpuid_add_entry(cpuid, cpuid_i, function, index);
+    hax_cpuid(env, function, index, entry);
+    hax_cpuid_drop_empty(entry, cpuid_i);
+}
+
+static uint32_t hax_build_cpuid(CPUArchState *env, struct hax_cpuid *cpuid)
+{
+    uint32_t cpuid_i = 0;
+
+    hax_cpuid_add(env, cpuid, &cpuid_i, 0x00000000, 0);
+    hax_cpuid_add(env, cpuid, &cpuid_i, 0x00000001, 0);
+    hax_cpuid_add(env, cpuid, &cpuid_i, 0x00000002, 0);
+    hax_cpuid_add(env, cpuid, &cpuid_i, 0x00000007, 0);
+    hax_cpuid_add(env, cpuid, &cpuid_i, 0x00000007, 1);
+    hax_cpuid_add(env, cpuid, &cpuid_i, 0x0000000a, 0);
+    hax_cpuid_add(env, cpuid, &cpuid_i, 0x00000015, 0);
+    hax_cpuid_add(env, cpuid, &cpuid_i, 0x00000016, 0);
+    hax_cpuid_add(env, cpuid, &cpuid_i, 0x40000000, 0);
+    hax_cpuid_add(env, cpuid, &cpuid_i, 0x80000000, 0);
+    hax_cpuid_add(env, cpuid, &cpuid_i, 0x80000001, 0);
+    hax_cpuid_add(env, cpuid, &cpuid_i, 0x80000002, 0);
+    hax_cpuid_add(env, cpuid, &cpuid_i, 0x80000003, 0);
+    hax_cpuid_add(env, cpuid, &cpuid_i, 0x80000004, 0);
+    hax_cpuid_add(env, cpuid, &cpuid_i, 0x80000006, 0);
+    hax_cpuid_add(env, cpuid, &cpuid_i, 0x80000008, 0);
+
+    return cpuid_i;
+}
+
+static int hax_vcpu_set_cpuid(CPUArchState *env)
+{
+    g_autofree struct hax_cpuid *cpuid = NULL;
+    size_t size;
+
+    if (!hax_global.supports_cpuid) {
+        return 0;
+    }
+
+    size = sizeof(*cpuid) +
+           HAX_MAX_CPUID_ENTRIES * sizeof(struct hax_cpuid_entry);
+    cpuid = g_malloc0(size);
+    cpuid->total = hax_build_cpuid(env, cpuid);
+
+    return hax_set_cpuid(env, cpuid);
 }
 
 struct hax_vm *hax_vm_create(struct hax_state *hax, int max_cpus)
@@ -336,6 +441,7 @@ static int hax_init(ram_addr_t ram_size, int max_cpus)
     }
 
     hax_memory_init();
+    qemu_mutex_init(&hax_cpuid_run_mutex);
 
     qversion.cur_version = hax_cur_version;
     qversion.min_version = hax_min_version;
@@ -514,9 +620,11 @@ static int hax_vcpu_hax_exec(CPUArchState *env)
         cpu->halted = 0;
     }
 
-    if (cpu_test_interrupt(cpu, CPU_INTERRUPT_INIT)) {
+    if (cpu_test_interrupt(cpu, CPU_INTERRUPT_INIT) &&
+        !(env->hflags & HF_SMM_MASK)) {
         DPRINTF("\nhax_vcpu_hax_exec: handling INIT for %d\n",
                 cpu->cpu_index);
+        hax_vcpu_sync_state(env, 0);
         do_cpu_init(x86_cpu);
         hax_vcpu_sync_state(env, 1);
     }
@@ -528,6 +636,13 @@ static int hax_vcpu_hax_exec(CPUArchState *env)
         hax_vcpu_sync_state(env, 0);
         do_cpu_sipi(x86_cpu);
         hax_vcpu_sync_state(env, 1);
+    }
+
+    if (cpu_test_interrupt(cpu, CPU_INTERRUPT_TPR)) {
+        cpu_reset_interrupt(cpu, CPU_INTERRUPT_TPR);
+        hax_vcpu_sync_state(env, 0);
+        apic_handle_tpr_access_report(x86_cpu->apic_state, env->eip,
+                                      env->tpr_access_type);
     }
 
     if (cpu->halted) {
@@ -553,7 +668,18 @@ static int hax_vcpu_hax_exec(CPUArchState *env)
 
         bql_unlock();
         cpu_exec_start(cpu);
-        hax_ret = hax_vcpu_run(vcpu);
+        qemu_mutex_lock(&hax_cpuid_run_mutex);
+        /*
+         * HAXM keeps guest CPUID in a VM-wide buffer shared by all APs.  Some
+         * CPUID data, such as leaf 1 EBX[31:24], is vCPU-specific, so refresh
+         * it immediately before entering the driver and prevent another vCPU
+         * from changing the shared buffer while this vCPU can execute CPUID.
+         */
+        hax_ret = hax_vcpu_set_cpuid(env);
+        if (!hax_ret) {
+            hax_ret = hax_vcpu_run(vcpu);
+        }
+        qemu_mutex_unlock(&hax_cpuid_run_mutex);
         cpu_exec_end(cpu);
         bql_lock();
 
@@ -906,6 +1032,7 @@ static int hax_get_msrs(CPUArchState *env)
     msrs[n++].entry = MSR_IA32_SYSENTER_ESP;
     msrs[n++].entry = MSR_IA32_SYSENTER_EIP;
     msrs[n++].entry = MSR_IA32_TSC;
+    msrs[n++].entry = MSR_IA32_APICBASE;
 #ifdef TARGET_X86_64
     msrs[n++].entry = MSR_EFER;
     msrs[n++].entry = MSR_STAR;
@@ -933,6 +1060,9 @@ static int hax_get_msrs(CPUArchState *env)
             break;
         case MSR_IA32_TSC:
             env->tsc = msrs[i].value;
+            break;
+        case MSR_IA32_APICBASE:
+            cpu_set_apic_base(env_archcpu(env)->apic_state, msrs[i].value);
             break;
 #ifdef TARGET_X86_64
         case MSR_EFER:
@@ -972,6 +1102,8 @@ static int hax_set_msrs(CPUArchState *env)
     hax_msr_entry_set(&msrs[n++], MSR_IA32_SYSENTER_ESP, env->sysenter_esp);
     hax_msr_entry_set(&msrs[n++], MSR_IA32_SYSENTER_EIP, env->sysenter_eip);
     hax_msr_entry_set(&msrs[n++], MSR_IA32_TSC, env->tsc);
+    hax_msr_entry_set(&msrs[n++], MSR_IA32_APICBASE,
+                      cpu_get_apic_base(env_archcpu(env)->apic_state));
 #ifdef TARGET_X86_64
     hax_msr_entry_set(&msrs[n++], MSR_EFER, env->efer);
     hax_msr_entry_set(&msrs[n++], MSR_STAR, env->star);

@@ -57,5 +57,6 @@ static inline void hax_close_fd(hax_fd fd)
 #define HAX_VCPU_IOCTL_INTERRUPT _IOWR(0, 0xc6, uint32_t)
 #define HAX_VCPU_SET_REGS       _IOWR(0, 0xc7, struct vcpu_state_t)
 #define HAX_VCPU_GET_REGS       _IOWR(0, 0xc8, struct vcpu_state_t)
+#define HAX_VCPU_IOCTL_SET_CPUID _IOW(0, 0xca, struct hax_cpuid *)
 
 #endif /* TARGET_I386_HAX_POSIX_H */
