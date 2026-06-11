@@ -114,6 +114,7 @@ target/i386/hax/meson.build
 accel/Kconfig
 accel/stubs/meson.build
 docs/about/removed-features.rst
+hw/i386/pc_q35.c
 hw/intc/apic_common.c
 include/exec/poison.h
 include/system/hw_accel.h
@@ -314,6 +315,36 @@ if (hax_enabled()) {
 
 - 这是旧 HAX 初始化路径的一部分，不是普通构建入口。
 - 如果启动早期出现 CPU 状态不同步、BIOS 行为和 TCG/WHPX 明显不同，应确认这段没有漏掉。
+
+### `hw/i386/pc_q35.c`
+
+当前 q35 host bridge 用 `smm-ranges` 控制是否创建 `smram-region`。HAX 不支持真正的 SMM 执行，但 q35 的低端 legacy PCI/VGA 窗口通过 `smram-region` 路由：
+
+```text
+00000000000a0000-00000000000bffff (prio 1, i/o): vga-lowmem
+```
+
+如果 HAX 下直接让 `smm-ranges = x86_machine_is_smm_enabled(x86ms)`，q35 不会创建该窗口，`0xa0000-0xbffff` 会继续落到 `pc.ram`，SeaBIOS 文本写入 `0xb8000` 后图形窗口仍然黑屏。
+
+当前处理：
+
+```c
+#include "system/hax.h"
+
+smm_enabled = x86_machine_is_smm_enabled(x86ms);
+smm_ranges = smm_enabled || hax_enabled();
+
+object_property_set_bool(phb, PCI_HOST_PROP_SMM_RANGES,
+                         smm_ranges, NULL);
+...
+qdev_prop_set_bit(lpc_dev, "smm-enabled", smm_enabled);
+```
+
+维护点：
+
+- `smm-ranges` 对 HAX 打开，是为了保留 q35 low legacy PCI/VGA memory window。
+- `smm-enabled` 仍不能因为 HAX 打开；HAX 没有完整 SMI/SMM 执行支持。
+- 如果 `-accel hax -machine q35 -cpu qemu64 -m 512M` 黑屏但 guest 仍在跑，优先用 `info mtree -f` 检查 `0xa0000-0xbffff` 是否是 `vga-lowmem`，而不是 `pc.ram`。
 
 ### `qemu-options.hx`
 
@@ -592,6 +623,46 @@ if (!vapic && s->vapic_control & VAPIC_ENABLE_MASK &&
 - HAX 不应走 KVM VAPIC 辅助路径；恢复 HAX 时要同步恢复这处非 HAX 目录里的条件。
 - 如果以后 `apic_common.c` 的 VAPIC 创建逻辑重构，仍要保留 HAX 排除条件或等价机制。
 
+### q35 legacy VGA lowmem 适配
+
+现象：
+
+```text
+-accel hax -machine q35 -cpu qemu64 -m 512M
+```
+
+guest 实际已经运行到 SeaBIOS 等待点，但图形窗口一直黑屏。QMP/HMP 采样可见：
+
+- `info registers` 已推进到 `CS=f000 EIP=0000b757` 附近。
+- `screendump` 全黑，像素数据全为 0。
+- `pmemsave 0xb8000` 能在普通 RAM 中看到 `Boot failed` 等 SeaBIOS 文本。
+- `info mtree -f` 中 `0xa0000-0xbffff` 显示为 `pc.ram`，而不是 `vga-lowmem`。
+
+原因：
+
+- q35 当前通过 `smm-ranges` 创建 `smram-region`。
+- `smram-region` 在普通 CPU 视图中把 `0xa0000-0xbffff` 路由到 PCI address space，从而让 VGA 的 `vga-lowmem` 覆盖 RAM。
+- HAX 不支持真正的 SMM，所以 `x86_machine_is_smm_enabled()` 对 HAX 返回 false。
+- 如果直接把这个 false 传给 q35 host bridge 的 `smm-ranges`，q35 不创建 `smram-region`，legacy VGA memory window 就不会出现在系统 flatview 中。
+
+处理：
+
+```c
+smm_enabled = x86_machine_is_smm_enabled(x86ms);
+smm_ranges = smm_enabled || hax_enabled();
+
+object_property_set_bool(phb, PCI_HOST_PROP_SMM_RANGES,
+                         smm_ranges, NULL);
+qdev_prop_set_bit(lpc_dev, "smm-enabled", smm_enabled);
+```
+
+维护点：
+
+- 这是 q35 memory topology 适配，不是 VGA 设备修复。
+- 不要把 `smm-enabled` 一起改成 `smm_ranges`；否则会把 HAX 不支持的 SMI/SMM 路径暴露给 guest。
+- 修复后 `info mtree -f` 应出现 `00000000000a0000-00000000000bffff (prio 1, i/o): vga-lowmem`。
+- 修复后 `screendump` 应不再全黑，`pmemsave 0xb8000` 也不应再在普通 RAM 中看到 SeaBIOS 文本。
+
 ### 删除提交外围项审计
 
 上游删除提交 `b91b0fc1635544341b9d00d1addc8ddf48e5b389` 不只删除了 `target/i386/hax/`。恢复时至少要审计这些外围项：
@@ -604,6 +675,7 @@ docs/about/index.rst
 docs/about/removed-features.rst
 docs/system/index.rst
 docs/system/introduction.rst
+hw/i386/pc_q35.c
 hw/intc/apic_common.c
 include/hw/core/cpu.h
 include/system/hw_accel.h
@@ -613,7 +685,7 @@ system/vl.c
 
 当前处理建议：
 
-- `hw/intc/apic_common.c` 和 `system/vl.c` 是运行相关项，必须恢复或做等价适配。
+- `hw/i386/pc_q35.c`、`hw/intc/apic_common.c` 和 `system/vl.c` 是运行相关项，必须恢复或做等价适配。
 - `system/cpus.c` 中旧的 Windows `SleepEx(0, TRUE)` 逻辑已经移到 HAX vCPU thread loop 中，位置在 `target/i386/hax/hax-accel-ops.c`。
 - `include/hw/core/cpu.h` 的 `vcpu_dirty` 注释应保留 HAX，字段本身当前仍存在。
 - `MAINTAINERS` 应补回 HAXM orphan 段，并把旧 `include/sysemu/hax.h` 路径改成当前 `include/system/hax.h`。
@@ -969,6 +1041,7 @@ include/hw/core/cpu.h
 include/system/cpus.h
 include/system/memory.h
 include/system/ramlist.h
+hw/i386/pc_q35.c
 hw/intc/apic_common.c
 system/cpus.c
 system/vl.c
