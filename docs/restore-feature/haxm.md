@@ -510,15 +510,19 @@ bql_lock();
 
 - 从 HAXM capability 中识别 `HAX_CAP_CPUID`。
 - 实现 `HAX_VCPU_IOCTL_SET_CPUID` 的 Windows/POSIX 平台入口。
-- 只下发 HAXM 驱动支持的 CPUID leaf：`0`、`1`、`2`、`7.0`、`7.1`、`0xa`、`0x15`、`0x16`、`0x40000000`、`0x80000000`、`0x80000001`、`0x80000002`、`0x80000003`、`0x80000004`、`0x80000006`、`0x80000008`。
+- 单 vCPU 时不调用 `SET_CPUID`，继续使用 HAXM 驱动默认 CPUID 路径。
+- SMP 时只下发 CPUID leaf `1`，用于刷新当前 vCPU 的 APIC ID/topology。
+- leaf `1` 的 family/model 和 feature bits 仍按 HAXM 默认策略保守处理：新 Intel family 6 model 回退到 `0x000106f1`，ECX/EDX 只保留旧 HAXM 默认支持的特性集合。
 - 在每次进入 `hax_vcpu_run()` 前按当前 vCPU 刷新 CPUID，并用 `hax_cpuid_run_mutex` 把 `SET_CPUID` 和 `hax_vcpu_run()` 串行化，避免其它 vCPU 在本 vCPU 执行 CPUID 时改写共享缓冲。
 
 维护点：
 
 - 这会牺牲 HAXM SMP 并行度，但 HAXM 驱动的 CPUID 存储模型本身不是 per-vCPU；为了正确性需要接受这个限制。
-- 不要把所有 QEMU CPUID leaf 都传给 HAXM；旧 HAXM 驱动只会处理固定 leaf 集合。
+- 不要把所有 QEMU CPUID leaf 都传给 HAXM。旧 HAXM 的默认 CPUID 路径会主动屏蔽部分 host/QEMU feature，并对较新的 Intel model 做回退；直接下发完整 QEMU CPUID 可能绕过这些保护。
+- 尤其不要为了统一逻辑在 `-smp 1` 下也调用 `SET_CPUID`。曾经把 `Skylake-Client-noTSX-IBRS` 的完整 CPUID 下发给 HAXM 后，Linux guest 会进入 HAXM 不能可靠支持的 CPU/PMU 路径并触发 kernel panic。
 - 如果 HAXM 驱动不支持 `HAX_CAP_CPUID`，当前代码保持旧行为；这种驱动下 SMP topology 仍可能不正确。
 - 如果以后改动这段逻辑，至少要验证 OVMF q35 1、2、4 vCPU 都能显示 TianoCore/PXE 或进入 UEFI shell。
+- 还要验证至少一个 Linux guest 的 `-smp 1` 启动路径，避免 CPUID 修复只覆盖固件阶段却破坏内核启动。
 
 ### fast MMIO 适配
 
@@ -1011,6 +1015,33 @@ ops->handle_interrupt = generic_handle_interrupt;
 - 这行应放在 `target/i386/hax/hax-accel-ops.c` 的 `hax_accel_ops_class_init()` 中。
 - WHPX、KVM、NVMM 等非 TCG 加速器也使用 `generic_handle_interrupt`。
 
+### Linux guest 启动时 kernel panic
+
+现象：
+
+```text
+-accel hax -cpu Skylake-Client-noTSX-IBRS -smp 1
+```
+
+固件阶段可以进入，但 Linux guest 启动内核后 panic。换回不改 HAX CPUID 的版本或使用 TCG 时，guest 可以继续启动。
+
+原因：
+
+- HAXM 驱动默认 CPUID 路径会主动屏蔽部分 CPU feature，并把较新的 Intel family 6 model 回退到旧 model，避免 guest 进入 HAXM 不能可靠模拟的 CPU/PMU 路径。
+- 如果 QEMU 在 `-smp 1` 下也调用 `HAX_VCPU_IOCTL_SET_CPUID`，并把 `Skylake-Client-noTSX-IBRS` 的完整 CPUID leaf 下发给 HAXM，就会绕过 HAXM 的默认兼容性过滤。
+- 这类问题和大小核 host 有一定相关性，但根因不是简单的 P/E core feature 交集，而是 HAXM 对较新 CPUID/PMU 组合支持不足。
+
+处理：
+
+- 单 vCPU 时不要调用 `SET_CPUID`，继续使用 HAXM 默认 CPUID。
+- SMP 时只为修复 APIC ID/topology 下发 leaf `1`，不要下发完整 QEMU CPUID 表。
+- leaf `1` 的 family/model 和 feature bits 要按 HAXM 默认策略保守过滤。
+
+维护点：
+
+- 不要为了统一代码路径把 `-smp 1` 也纳入 HAX CPUID 刷新逻辑。
+- 修改 HAX CPUID 逻辑后，除了验证 OVMF 1、2、4 vCPU，还要至少验证一个 Linux guest 的单 vCPU 启动路径。
+
 ### `hax_start_vcpu_thread` 断言 `cpu->accel`
 
 现象：
@@ -1159,6 +1190,7 @@ build/qemu-system-x86_64.exe -accel help
 - `-accel help` 输出包含 `hax`。
 - HAX q35 + OVMF + `Skylake-Client-noTSX-IBRS` 在 1、2、4 vCPU 下均可显示 TianoCore/PXE 画面。
 - HAX q35 + SeaBIOS + `qemu64` 仍可显示，`info mtree -f` 中 `0xa0000-0xbffff` 仍为 `vga-lowmem`，没有回退成 `pc.ram`。
+- HAX `adl-n` + fnOS/Linux + `Skylake-Client-noTSX-IBRS` + 1 vCPU 可启动到登录画面，未再触发 CPUID 相关 kernel panic。
 
 尚未验证：
 

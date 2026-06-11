@@ -265,14 +265,6 @@ static struct hax_cpuid_entry *hax_cpuid_add_entry(struct hax_cpuid *cpuid,
     return entry;
 }
 
-static void hax_cpuid_drop_empty(struct hax_cpuid_entry *entry,
-                                 uint32_t *cpuid_i)
-{
-    if (!entry->eax && !entry->ebx && !entry->ecx && !entry->edx) {
-        (*cpuid_i)--;
-    }
-}
-
 static void hax_cpuid(CPUArchState *env, uint32_t function, uint32_t index,
                       struct hax_cpuid_entry *entry)
 {
@@ -285,37 +277,70 @@ static void hax_cpuid(CPUArchState *env, uint32_t function, uint32_t index,
     entry->edx = edx;
 }
 
-static void hax_cpuid_add(CPUArchState *env, struct hax_cpuid *cpuid,
-                          uint32_t *cpuid_i, uint32_t function,
-                          uint32_t index)
+static uint32_t hax_cpuid_1_eax(uint32_t eax)
 {
-    struct hax_cpuid_entry *entry;
+    uint32_t family = ((eax >> 8) & 0xf);
+    uint32_t model = ((eax >> 4) & 0xf);
+    uint32_t ext_model = ((eax >> 16) & 0xf);
+    uint32_t ext_family = ((eax >> 20) & 0xff);
+    uint32_t display_family = family == 0xf ? family + ext_family : family;
+    uint32_t display_model = (family == 0x6 || family == 0xf) ?
+                             (ext_model << 4) | model : model;
 
-    entry = hax_cpuid_add_entry(cpuid, cpuid_i, function, index);
-    hax_cpuid(env, function, index, entry);
-    hax_cpuid_drop_empty(entry, cpuid_i);
+    /*
+     * Match HAXM's default CPUID path.  Newer Intel model IDs can make guest
+     * kernels initialize host PMU paths that HAXM cannot emulate correctly.
+     */
+    if (display_family == 0x6 && display_model > 0x1f) {
+        return 0x000106f1;
+    }
+
+    return eax;
 }
 
 static uint32_t hax_build_cpuid(CPUArchState *env, struct hax_cpuid *cpuid)
 {
     uint32_t cpuid_i = 0;
+    struct hax_cpuid_entry *entry;
 
-    hax_cpuid_add(env, cpuid, &cpuid_i, 0x00000000, 0);
-    hax_cpuid_add(env, cpuid, &cpuid_i, 0x00000001, 0);
-    hax_cpuid_add(env, cpuid, &cpuid_i, 0x00000002, 0);
-    hax_cpuid_add(env, cpuid, &cpuid_i, 0x00000007, 0);
-    hax_cpuid_add(env, cpuid, &cpuid_i, 0x00000007, 1);
-    hax_cpuid_add(env, cpuid, &cpuid_i, 0x0000000a, 0);
-    hax_cpuid_add(env, cpuid, &cpuid_i, 0x00000015, 0);
-    hax_cpuid_add(env, cpuid, &cpuid_i, 0x00000016, 0);
-    hax_cpuid_add(env, cpuid, &cpuid_i, 0x40000000, 0);
-    hax_cpuid_add(env, cpuid, &cpuid_i, 0x80000000, 0);
-    hax_cpuid_add(env, cpuid, &cpuid_i, 0x80000001, 0);
-    hax_cpuid_add(env, cpuid, &cpuid_i, 0x80000002, 0);
-    hax_cpuid_add(env, cpuid, &cpuid_i, 0x80000003, 0);
-    hax_cpuid_add(env, cpuid, &cpuid_i, 0x80000004, 0);
-    hax_cpuid_add(env, cpuid, &cpuid_i, 0x80000006, 0);
-    hax_cpuid_add(env, cpuid, &cpuid_i, 0x80000008, 0);
+    entry = hax_cpuid_add_entry(cpuid, &cpuid_i, 0x00000001, 0);
+    hax_cpuid(env, 0x00000001, 0, entry);
+    entry->eax = hax_cpuid_1_eax(entry->eax);
+    entry->ecx &= CPUID_EXT_SSE3 |
+                  CPUID_EXT_SSSE3 |
+                  CPUID_EXT_SSE41 |
+                  CPUID_EXT_SSE42 |
+                  CPUID_EXT_CX16 |
+                  CPUID_EXT_MOVBE |
+                  CPUID_EXT_AES |
+                  CPUID_EXT_PCLMULQDQ |
+                  CPUID_EXT_POPCNT |
+                  CPUID_EXT_XSAVE |
+                  CPUID_EXT_AVX |
+                  CPUID_EXT_F16C;
+    entry->edx &= CPUID_PAT |
+                  CPUID_FP87 |
+                  CPUID_VME |
+                  CPUID_DE |
+                  CPUID_TSC |
+                  CPUID_MSR |
+                  CPUID_PAE |
+                  CPUID_MCE |
+                  CPUID_CX8 |
+                  CPUID_APIC |
+                  CPUID_SEP |
+                  CPUID_MTRR |
+                  CPUID_PGE |
+                  CPUID_MCA |
+                  CPUID_CMOV |
+                  CPUID_CLFLUSH |
+                  CPUID_MMX |
+                  CPUID_FXSR |
+                  CPUID_SSE |
+                  CPUID_SSE2 |
+                  CPUID_SS |
+                  CPUID_PSE |
+                  CPUID_HT;
 
     return cpuid_i;
 }
@@ -325,7 +350,7 @@ static int hax_vcpu_set_cpuid(CPUArchState *env)
     g_autofree struct hax_cpuid *cpuid = NULL;
     size_t size;
 
-    if (!hax_global.supports_cpuid) {
+    if (!hax_global.supports_cpuid || hax_global.vm->numvcpus <= 1) {
         return 0;
     }
 
