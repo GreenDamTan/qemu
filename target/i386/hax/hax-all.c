@@ -34,6 +34,7 @@
 #include "system/runstate.h"
 #include "hw/core/boards.h"
 #include "hw/i386/apic.h"
+#include "qemu/atomic.h"
 #include "qemu/thread.h"
 
 #include "hax-accel-ops.h"
@@ -60,6 +61,7 @@ static void hax_vcpu_sync_state(CPUArchState *env, int modified);
 static int hax_arch_get_registers(CPUArchState *env);
 static int hax_vcpu_set_cpuid(CPUArchState *env);
 static QemuMutex hax_cpuid_run_mutex;
+static bool hax_cpuid_run_locked = true;
 
 int valid_hax_tunnel_size(uint16_t size)
 {
@@ -302,10 +304,13 @@ static uint32_t hax_build_cpuid(CPUArchState *env, struct hax_cpuid *cpuid)
 {
     uint32_t cpuid_i = 0;
     struct hax_cpuid_entry *entry;
+    uint32_t apic_id;
 
     entry = hax_cpuid_add_entry(cpuid, &cpuid_i, 0x00000001, 0);
     hax_cpuid(env, 0x00000001, 0, entry);
+    apic_id = entry->ebx & 0xff000000;
     entry->eax = hax_cpuid_1_eax(entry->eax);
+    entry->ebx = apic_id | (0x01 << 16) | (0x08 << 8);
     entry->ecx &= CPUID_EXT_SSE3 |
                   CPUID_EXT_SSSE3 |
                   CPUID_EXT_SSE41 |
@@ -318,6 +323,7 @@ static uint32_t hax_build_cpuid(CPUArchState *env, struct hax_cpuid *cpuid)
                   CPUID_EXT_XSAVE |
                   CPUID_EXT_AVX |
                   CPUID_EXT_F16C;
+    entry->ecx |= CPUID_EXT_HYPERVISOR;
     entry->edx &= CPUID_PAT |
                   CPUID_FP87 |
                   CPUID_VME |
@@ -360,6 +366,24 @@ static int hax_vcpu_set_cpuid(CPUArchState *env)
     cpuid->total = hax_build_cpuid(env, cpuid);
 
     return hax_set_cpuid(env, cpuid);
+}
+
+static bool hax_smp_cpuid_enabled(void)
+{
+    return hax_global.supports_cpuid && hax_global.vm->numvcpus > 1;
+}
+
+static bool hax_vcpu_in_kernel(CPUState *cpu, CPUArchState *env)
+{
+    /*
+     * HAXM's CPUID buffer is shared across vCPUs, so firmware and bootloader
+     * SMP bring-up need SET_CPUID + RUN serialization to keep APIC IDs stable.
+     * Once the BSP is executing a 64-bit high-half kernel, stop serializing the
+     * whole RUN ioctl; otherwise HAX SMP becomes slower than one vCPU.
+     */
+    return cpu->cpu_index == 0 &&
+           (env->hflags & HF_CS64_MASK) &&
+           env->eip >= 0xffff800000000000ULL;
 }
 
 struct hax_vm *hax_vm_create(struct hax_state *hax, int max_cpus)
@@ -693,18 +717,32 @@ static int hax_vcpu_hax_exec(CPUArchState *env)
 
         bql_unlock();
         cpu_exec_start(cpu);
-        qemu_mutex_lock(&hax_cpuid_run_mutex);
-        /*
-         * HAXM keeps guest CPUID in a VM-wide buffer shared by all APs.  Some
-         * CPUID data, such as leaf 1 EBX[31:24], is vCPU-specific, so refresh
-         * it immediately before entering the driver and prevent another vCPU
-         * from changing the shared buffer while this vCPU can execute CPUID.
-         */
-        hax_ret = hax_vcpu_set_cpuid(env);
-        if (!hax_ret) {
-            hax_ret = hax_vcpu_run(vcpu);
+        if (qatomic_read(&hax_cpuid_run_locked)) {
+            qemu_mutex_lock(&hax_cpuid_run_mutex);
+            /*
+             * HAXM keeps guest CPUID in a VM-wide buffer shared by all APs.
+             * During firmware and bootloader SMP bring-up, serialize the run
+             * itself so a vCPU cannot execute CPUID with another vCPU's APIC
+             * ID in leaf 1 EBX[31:24].
+             */
+            hax_ret = hax_vcpu_set_cpuid(env);
+            if (!hax_ret) {
+                hax_ret = hax_vcpu_run(vcpu);
+            }
+            qemu_mutex_unlock(&hax_cpuid_run_mutex);
+        } else {
+            /*
+             * After the BSP reaches the guest kernel, keeping the RUN ioctl
+             * serialized makes SMP unusably slow.  Still serialize SET_CPUID
+             * updates, but allow vCPUs to run in parallel afterwards.
+             */
+            qemu_mutex_lock(&hax_cpuid_run_mutex);
+            hax_ret = hax_vcpu_set_cpuid(env);
+            qemu_mutex_unlock(&hax_cpuid_run_mutex);
+            if (!hax_ret) {
+                hax_ret = hax_vcpu_run(vcpu);
+            }
         }
-        qemu_mutex_unlock(&hax_cpuid_run_mutex);
         cpu_exec_end(cpu);
         bql_lock();
 
@@ -764,6 +802,11 @@ static int hax_vcpu_hax_exec(CPUArchState *env)
         /* these situations will continue to hax module */
         case HAX_EXIT_INTERRUPT:
         case HAX_EXIT_PAUSED:
+            hax_vcpu_sync_state(env, 0);
+            if (hax_smp_cpuid_enabled() && qatomic_read(&hax_cpuid_run_locked) &&
+                hax_vcpu_in_kernel(cpu, env)) {
+                qatomic_set(&hax_cpuid_run_locked, false);
+            }
             break;
         case HAX_EXIT_MMIO:
             /* Should not happen on UG system */

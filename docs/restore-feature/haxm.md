@@ -399,6 +399,7 @@ HAXM (``-accel hax``) (removed in 8.2)
 #include "system/address-spaces.h"
 #include "hw/core/boards.h"
 #include "hw/i386/apic.h"
+#include "qemu/atomic.h"
 #include "qemu/thread.h"
 ```
 
@@ -409,6 +410,7 @@ HAXM (``-accel hax``) (removed in 8.2)
 - `system/address-spaces.h` 提供 `address_space_memory` / `address_space_io`。
 - `hw/core/boards.h` 提供 `MachineState` 完整定义。
 - `hw/i386/apic.h` 提供 TPR access report 和 APIC base 同步所需接口。
+- `qemu/atomic.h` 提供 HAX CPUID/run 阶段标记使用的 `qatomic_read()` / `qatomic_set()`。
 - `qemu/thread.h` 提供 HAX CPUID/run 串行化使用的 `QemuMutex`。
 
 `hax-mem.c` 当前需要：
@@ -489,7 +491,14 @@ bql_lock();
 
 ### HAX SMP CPUID 适配
 
-现象：
+这一段修的是两个连续暴露的问题：
+
+- OVMF 或 Linux bootloader 阶段，SMP guest 因为 CPUID leaf `1` 的 APIC ID/topology 不稳定而卡死。
+- 为了修上一个问题把 `SET_CPUID + hax_vcpu_run()` 全程串行化后，Linux 虽能继续启动，但 4 vCPU 运行比 1 vCPU 更慢，甚至 Web/SSH 长时间无响应。
+
+#### 固件和 bootloader 阶段 CPUID 错乱
+
+现象一：
 
 ```text
 -accel hax -machine q35 \
@@ -500,11 +509,48 @@ bql_lock();
 
 1 或 2 vCPU 可以进入 OVMF/TianoCore，4 vCPU 或更多时图形窗口停在黑屏或固件占位画面。调试 OVMF MP mailbox 时可见 AP 已收到 INIT/SIPI，但后续卡在 MP 初始化或异常处理路径。
 
+现象二：
+
+```text
+-accel hax -machine adl-n \
+  -drive if=pflash,format=raw,unit=0,readonly=on,file=build/pc-bios/edk2-x86_64-code.fd \
+  -m 2048 -smp 4,sockets=1,cores=4,threads=1 \
+  -cpu Skylake-Client-noTSX-IBRS \
+  -serial stdio
+```
+
+fnOS/Linux 可以看到 GRUB 选择项和内核加载信息，但长时间停在：
+
+```text
+Booting `FNOS GNU/Linux'
+Loading Linux 6.18.18-trim ...
+Loading initial ramdisk ...
+```
+
+`-serial stdio` 没有后续 Linux kernel 日志，hostfwd 的 Web/SSH 端口也没有实际响应。
+
 原因：
 
 - HAXM 驱动内部只给 vCPU 0 分配 `guest_cpuid`，其它 vCPU 共享 vCPU 0 的 CPUID 缓冲。
 - CPUID leaf 1 的 `EBX[31:24]` 包含当前 vCPU 的 initial APIC ID，QEMU 为每个 vCPU 生成的值不同。
 - 多 vCPU 并发进入 HAXM 时，如果共享 CPUID 缓冲里保留了其它 vCPU 的 APIC ID/topology，固件 MP 初始化可能把 AP 识别错，进而挂在 OVMF 早期路径。
+- HAXM 没有向 QEMU 暴露 CPUID VM exit。`struct hax_tunnel` 只有 IO、MMIO、HLT、interrupt、state-change 等 exit reason，QEMU 无法在 guest 真正执行 CPUID 的瞬间按 vCPU 临时切换 leaf `1`。
+- HAXM 默认 CPUID 路径并不会原样使用 QEMU leaf `1`。旧驱动会把较新的 Intel family 6 model 回退到 `0x000106f1`，会固定 EBX 低 24 位，并会补 `HYPERVISOR` 位。直接下发完整 QEMU leaf `1` 会绕过这些兼容性过滤。
+
+关键 HAXM 默认 leaf `1` 行为：
+
+```c
+/* 新 Intel family 6 model 回退 */
+if (display_family == 0x6 && display_model > 0x1f) {
+    eax = 0x000106f1;
+}
+
+/* HAXM 默认 EBX 低 24 位 */
+ebx = (0x01 << 16) | (0x08 << 8) | 0x00;
+
+/* ECX 保留 HAXM 支持位，并补 HYPERVISOR */
+ecx = (ecx & hax_supported_ecx) | CPUID_EXT_HYPERVISOR;
+```
 
 当前处理：
 
@@ -512,17 +558,81 @@ bql_lock();
 - 实现 `HAX_VCPU_IOCTL_SET_CPUID` 的 Windows/POSIX 平台入口。
 - 单 vCPU 时不调用 `SET_CPUID`，继续使用 HAXM 驱动默认 CPUID 路径。
 - SMP 时只下发 CPUID leaf `1`，用于刷新当前 vCPU 的 APIC ID/topology。
-- leaf `1` 的 family/model 和 feature bits 仍按 HAXM 默认策略保守处理：新 Intel family 6 model 回退到 `0x000106f1`，ECX/EDX 只保留旧 HAXM 默认支持的特性集合。
-- 在每次进入 `hax_vcpu_run()` 前按当前 vCPU 刷新 CPUID，并用 `hax_cpuid_run_mutex` 把 `SET_CPUID` 和 `hax_vcpu_run()` 串行化，避免其它 vCPU 在本 vCPU 执行 CPUID 时改写共享缓冲。
+- leaf `1` 的 family/model、EBX 低 24 位和 feature bits 仍按 HAXM 默认策略保守处理：新 Intel family 6 model 回退到 `0x000106f1`，EBX 只保留 `EBX[31:24]` 的当前 vCPU APIC ID，低 24 位使用 HAXM 默认的 logical processor count、CLFLUSH line size 和 brand index，ECX/EDX 只保留旧 HAXM 默认支持的特性集合。
+- leaf `1` 的 ECX 要补回 `HYPERVISOR` 位，和 HAXM 驱动默认 CPUID 路径保持一致。
+- 在每次进入 `hax_vcpu_run()` 前按当前 vCPU 刷新 CPUID。
+- 固件和 bootloader SMP bring-up 阶段用 `hax_cpuid_run_mutex` 把 `SET_CPUID` 和 `hax_vcpu_run()` 串行化，避免其它 vCPU 在本 vCPU 执行 CPUID 时改写共享缓冲。
 
 维护点：
 
-- 这会牺牲 HAXM SMP 并行度，但 HAXM 驱动的 CPUID 存储模型本身不是 per-vCPU；为了正确性需要接受这个限制。
+- 固件/bootloader 阶段串行 `SET_CPUID + RUN` 会牺牲 HAXM SMP 并行度，但 HAXM 驱动的 CPUID 存储模型本身不是 per-vCPU；为了早期 APIC ID 正确性需要接受这个限制。
 - 不要把所有 QEMU CPUID leaf 都传给 HAXM。旧 HAXM 的默认 CPUID 路径会主动屏蔽部分 host/QEMU feature，并对较新的 Intel model 做回退；直接下发完整 QEMU CPUID 可能绕过这些保护。
+- 不要直接把 QEMU 生成的 leaf `1` EBX 原样传给 HAXM。HAXM 默认路径会把 EBX 低 24 位固定为旧兼容值；只需要保留 `EBX[31:24]` 里的 vCPU APIC ID。曾经保留 QEMU EBX 低 24 位时，`adl-n` + fnOS/Linux + 4 vCPU 会停在 `Loading initial ramdisk ...`。
 - 尤其不要为了统一逻辑在 `-smp 1` 下也调用 `SET_CPUID`。曾经把 `Skylake-Client-noTSX-IBRS` 的完整 CPUID 下发给 HAXM 后，Linux guest 会进入 HAXM 不能可靠支持的 CPU/PMU 路径并触发 kernel panic。
 - 如果 HAXM 驱动不支持 `HAX_CAP_CPUID`，当前代码保持旧行为；这种驱动下 SMP topology 仍可能不正确。
 - 如果以后改动这段逻辑，至少要验证 OVMF q35 1、2、4 vCPU 都能显示 TianoCore/PXE 或进入 UEFI shell。
 - 还要验证至少一个 Linux guest 的 `-smp 1` 启动路径，避免 CPUID 修复只覆盖固件阶段却破坏内核启动。
+
+#### Linux 内核阶段 SMP 串行过慢
+
+现象：
+
+修完 leaf `1` APIC ID 后，如果继续在整个生命周期里用 `hax_cpuid_run_mutex` 包住 `SET_CPUID + hax_vcpu_run()`，fnOS/Linux 4 vCPU 不再停在 `Loading initial ramdisk ...`，加 `-serial stdio` 可以看到内核和 systemd 继续启动，但速度非常慢。实际观察到：
+
+- 4 vCPU 启动比 1 vCPU 更慢。
+- 300 秒内 Web `127.0.0.1:5666` 超时。
+- SSH hostfwd 端口能建立 TCP 连接，但读不到 SSH banner。
+- HMP `info registers` 显示 vCPU 已在 64-bit Linux kernel 高地址区运行，不是固件黑屏或 bootloader 卡死。
+
+原因：
+
+- HAXM 的 CPUID 缓冲是 VM-wide，早期阶段必须防止其它 vCPU 在当前 vCPU 执行 CPUID 时改写 leaf `1`。
+- 但如果把整个 `hax_vcpu_run()` 一直放在同一把锁里，多个 vCPU 实际只能轮流进入 HAXM。Linux SMP 启动阶段有大量 IPI、timer、调度和设备初始化，串行运行会放大等待成本。
+- HAX tunnel 没有 CPUID exit，无法做精确的 per-CPUID 临界区。只能用阶段性策略：早期需要正确性时串行 run，进入内核后恢复并行。
+
+当前处理：
+
+- 增加 `hax_cpuid_run_locked` 全局阶段标记，初始为 true。
+- 当 BSP 通过 HAX exit 回到 QEMU 时同步寄存器。如果满足 `cpu_index == 0`、`HF_CS64_MASK` 已设置、`RIP >= 0xffff800000000000`，认为 guest 已进入 64-bit high-half kernel。
+- 进入 kernel 后把 `hax_cpuid_run_locked` 置为 false。
+- `hax_cpuid_run_locked == true` 时保持早期策略：锁住 `SET_CPUID + hax_vcpu_run()`。
+- `hax_cpuid_run_locked == false` 时只锁住 `hax_vcpu_set_cpuid()` ioctl，随后释放锁再调用 `hax_vcpu_run()`，让 vCPU 并行运行。
+
+判断 high-half kernel 的原因：
+
+- OVMF、GRUB、Linux decompressor 和早期 trampoline 常在低地址执行，仍属于 APIC ID/topology 容易影响启动的阶段。
+- x86_64 Linux 正式内核通常运行在 canonical high-half 地址，实际 fnOS 采样中 `RIP=ffffffff...` 后已经进入内核。
+- 这个判断是保守启发式，不是 HAXM 提供的 ABI。它的目标是避免把 run 串行延续到 Linux 内核正常 SMP 阶段。
+
+维护点：
+
+- 不要把 `SET_CPUID + RUN` 串行化延续到 guest kernel 阶段。曾经全程持有 run 锁时，`adl-n` + fnOS/Linux + 4 vCPU 虽然能看到内核启动，但启动速度比 1 vCPU 更慢，Web/SSH 长时间无响应。
+- 不要在固件阶段过早解除 run 锁。曾经只锁 `SET_CPUID`、不锁 `hax_vcpu_run()` 时，会很快触发 HAX state-change exit，并反复打印 `VCPU shutdown request`。
+- `HAX_EXIT_INTERRUPT` 和 `HAX_EXIT_PAUSED` 路径为了识别阶段会调用 `hax_vcpu_sync_state(env, 0)`。这会增加少量 exit 成本，但只发生在 HAX 已经返回 QEMU 时，比全程串行 run 的代价小得多。
+- 这个策略主要覆盖 Windows HAXM 驱动的共享 CPUID 缓冲行为；POSIX HAX 路径没有实测过，移植时要重新验证。
+
+验证命令：
+
+```sh
+build/qemu-system-x86_64.exe \
+  -machine adl-n \
+  -drive if=pflash,format=raw,unit=0,readonly=on,file=build/pc-bios/edk2-x86_64-code.fd \
+  -m 2048 \
+  -smp 4,sockets=1,cores=4,threads=1 \
+  -cpu Skylake-Client-noTSX-IBRS \
+  -boot d \
+  -accel hax \
+  -serial stdio \
+  ... fnOS nvme and netdev options ...
+```
+
+验证结果：
+
+- `-smp 4` 可越过 `Loading initial ramdisk ...`。
+- serial 输出可进入 fnOS 登录界面。
+- hostfwd Web `http://127.0.0.1:5666/` 返回 HTTP 200。
+- hostfwd SSH 返回 `SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u7`。
+- `-smp 1` 同一 guest 仍可启动到登录界面，未回归。
 
 ### fast MMIO 适配
 
@@ -1191,6 +1301,7 @@ build/qemu-system-x86_64.exe -accel help
 - HAX q35 + OVMF + `Skylake-Client-noTSX-IBRS` 在 1、2、4 vCPU 下均可显示 TianoCore/PXE 画面。
 - HAX q35 + SeaBIOS + `qemu64` 仍可显示，`info mtree -f` 中 `0xa0000-0xbffff` 仍为 `vga-lowmem`，没有回退成 `pc.ram`。
 - HAX `adl-n` + fnOS/Linux + `Skylake-Client-noTSX-IBRS` + 1 vCPU 可启动到登录画面，未再触发 CPUID 相关 kernel panic。
+- HAX `adl-n` + fnOS/Linux + `Skylake-Client-noTSX-IBRS` + 4 vCPU 可越过 `Loading initial ramdisk ...`，进入登录界面，hostfwd Web 返回 HTTP 200，SSH 返回 banner。
 
 尚未验证：
 
