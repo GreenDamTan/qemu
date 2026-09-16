@@ -43,13 +43,21 @@ static void idebus_unrealize(BusState *bus)
 
     if (ibus->vmstate) {
         qemu_del_vm_change_state_handler(ibus->vmstate);
+        ibus->vmstate = NULL;
     }
+}
+
+static void idebus_finalize(Object *obj)
+{
+    /* 控制器 realize 失败时，子总线可能尚未 realize。 */
+    idebus_unrealize(BUS(obj));
 }
 
 static const TypeInfo ide_bus_info = {
     .name = TYPE_IDE_BUS,
     .parent = TYPE_BUS,
     .instance_size = sizeof(IDEBus),
+    .instance_finalize = idebus_finalize,
     .class_init = ide_bus_class_init,
 };
 
