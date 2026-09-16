@@ -175,6 +175,7 @@ enum AHCIPortIRQ {
 #define PORT_CMD_POWER_ON         (1 << 2) /* Power up device */
 #define PORT_CMD_SPIN_UP          (1 << 1) /* Spin up device */
 #define PORT_CMD_START            (1 << 0) /* Enable port DMA engine */
+#define PORT_CMD_HPCP             (1U << 18)
 
 #define PORT_CMD_ICC_MASK        (0xfU << 28) /* i/f ICC state mask */
 #define PORT_CMD_ICC_ACTIVE       (0x1 << 28) /* Put i/f in active state */
@@ -203,6 +204,9 @@ enum AHCIPortIRQ {
 
 #define SATA_SCR_SSTATUS_IPM_NODEV        0x000
 #define SATA_SCR_SSTATUS_IPM_ACTIVE       0X100
+
+#define PORT_SERR_PHYRDY_CHG              (1U << 16)
+#define PORT_SERR_DEV_XCHG                (1U << 26)
 
 #define AHCI_SCR_SCTL_DET                 0xf
 
@@ -381,5 +385,6 @@ void ahci_init(AHCIState *s, DeviceState *qdev);
 void ahci_uninit(AHCIState *s);
 
 void ahci_reset(AHCIState *s);
+void ahci_port_device_changed(AHCIState *s, unsigned port, bool present);
 
 #endif /* HW_IDE_AHCI_INTERNAL_H */

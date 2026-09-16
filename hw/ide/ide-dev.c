@@ -39,6 +39,7 @@ static void ide_qdev_realize(DeviceState *qdev, Error **errp)
     IDEDevice *dev = IDE_DEVICE(qdev);
     IDEDeviceClass *dc = IDE_DEVICE_GET_CLASS(dev);
     IDEBus *bus = DO_UPCAST(IDEBus, qbus, qdev->parent_bus);
+    Error *local_err = NULL;
 
     if (dev->unit == -1) {
         dev->unit = bus->master ? 1 : 0;
@@ -69,7 +70,44 @@ static void ide_qdev_realize(DeviceState *qdev, Error **errp)
         error_setg(errp, "Invalid IDE unit %d", dev->unit);
         return;
     }
-    dc->realize(dev, errp);
+
+    dc->realize(dev, &local_err);
+    if (local_err) {
+        bus->ifs[dev->unit].blk = NULL;
+        if (dev->unit) {
+            bus->slave = NULL;
+        } else {
+            bus->master = NULL;
+        }
+        error_propagate(errp, local_err);
+    }
+}
+
+static void ide_qdev_unrealize(DeviceState *qdev)
+{
+    IDEDevice *dev = IDE_DEVICE(qdev);
+    IDEBus *bus = IDE_BUS(qdev->parent_bus);
+    IDEState *s = &bus->ifs[dev->unit];
+    const char *suffix = dev->unit ? "/disk@1" : "/disk@0";
+
+    if (dev->conf.blk) {
+        blk_drain(dev->conf.blk);
+        blk_set_dev_ops(dev->conf.blk, NULL, NULL);
+        blockdev_mark_auto_del(dev->conf.blk);
+    }
+
+    del_boot_device_path(qdev, suffix);
+    del_boot_device_lchs(qdev, suffix);
+    s->blk = NULL;
+    s->identify_set = 0;
+
+    if (dev->unit) {
+        assert(bus->slave == dev);
+        bus->slave = NULL;
+    } else {
+        assert(bus->master == dev);
+        bus->master = NULL;
+    }
 }
 
 void ide_dev_initfn(IDEDevice *dev, IDEDriveKind kind, Error **errp)
@@ -241,7 +279,9 @@ static const TypeInfo ide_cd_info = {
 static void ide_device_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *k = DEVICE_CLASS(klass);
+
     k->realize = ide_qdev_realize;
+    k->unrealize = ide_qdev_unrealize;
     set_bit(DEVICE_CATEGORY_STORAGE, k->categories);
     k->bus_type = TYPE_IDE_BUS;
     device_class_set_props(k, ide_props);

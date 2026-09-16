@@ -1,4 +1,5 @@
 system_ss.add(when: 'CONFIG_AHCI', if_true: files('ahci.c'))
+system_ss.add(when: 'CONFIG_AHCI_ASMEDIA1062', if_true: files('asmedia1062.c'))
 system_ss.add(when: 'CONFIG_AHCI_ICH9', if_true: files('ich.c'))
 system_ss.add(when: 'CONFIG_AHCI_SYSBUS', if_true: files('ahci-sysbus.c'))
 system_ss.add(when: 'CONFIG_ALLWINNER_A10', if_true: files('ahci-allwinner.c'))
