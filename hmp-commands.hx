@@ -21,6 +21,21 @@ SRST
 ERST
 
     {
+        .name       = "trim-mmio",
+        .args_type  = "id:s,value:s,duration:s?",
+        .params     = "id value [duration]",
+        .help       = "设置 MMIO 寄存器，可在指定虚拟秒数后恢复默认值",
+        .cmd        = hmp_trim_mmio,
+    },
+
+SRST
+``trim-mmio`` *id* *value* [*duration*]
+  设置指定 ``trim-mmio`` 设备的原始寄存器值。可选的 *duration* 为
+  正整数秒，使用虚拟时间，虚拟机暂停时不计时；到期恢复设备的 ``default``。
+  新命令会替换旧计时，省略 *duration* 则取消旧计时。客户机写入不会取消计时。
+ERST
+
+    {
         .name       = "commit",
         .args_type  = "device:B",
         .params     = "device|all",
