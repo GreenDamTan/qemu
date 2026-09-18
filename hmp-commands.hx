@@ -679,6 +679,20 @@ SRST
 ERST
 
     {
+        .name       = "gpio",
+        .args_type  = "id:s,value:s,duration:s?",
+        .params     = "id value [duration]",
+        .help       = "设置 GPIO 电平，可在指定虚拟秒数后恢复默认值",
+        .cmd        = hmp_gpio,
+    },
+
+SRST
+``gpio`` *id* *value* [*duration*]
+  设置指定 GPIO 设备的原始寄存器位模式，只更新 gpio-mask 选中的位。
+  可选 duration 是恢复默认 GPIO 电平前的正整数虚拟秒数；省略时取消旧计时。
+ERST
+
+    {
         .name       = "device_add",
         .args_type  = "device:O",
         .params     = "driver[,prop=value][,...]",

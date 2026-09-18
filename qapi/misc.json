@@ -599,3 +599,31 @@
 { 'event': 'VFU_CLIENT_HANGUP',
   'data': { 'vfu-id': 'str', 'vfu-qom-path': 'str',
             'dev-id': 'str', 'dev-qom-path': 'str' } }
+
+##
+# @gpio:
+#
+# 设置独立 gpio 设备的电平，可定时恢复默认值。
+#
+# @id: 启动时指定的 gpio 设备 ID。
+#
+# @value: 原始寄存器位模式，必须能用设备配置的 size 字节表示；
+#     只更新 gpio-mask 选中的位，其他位保持不变。
+#
+# @duration: 恢复默认 GPIO 电平前的虚拟时间，单位为秒，必须为正整数。
+#     虚拟机暂停时停止计时；省略此参数则取消已有计时。
+#
+# 新命令替换旧计时，到期只恢复 gpio-mask 选中的位。
+# 客户机写入受 write-mask 限制，且不取消计时。
+# 机器重置取消计时并恢复完整 default 值。
+#
+# Since: 11.0.1
+#
+# .. qmp-example::
+#
+#     -> { "execute": "gpio",
+#          "arguments": { "id": "gpio0", "value": 0, "duration": 5 } }
+#     <- { "return": {} }
+##
+{ 'command': 'gpio',
+  'data': { 'id': 'str', 'value': 'uint32', '*duration': 'uint32' } }
