@@ -619,16 +619,56 @@ static void ahci_set_signature(AHCIDevice *ad, uint32_t sig)
                              s->lcyl, s->hcyl, sig);
 }
 
+static void ahci_cancel_port_io(AHCIDevice *d)
+{
+    IDEBus *bus = &d->port;
+    IDEState *ide_state = &bus->ifs[0];
+    int i;
+
+    d->port_regs.cmd_issue = 0;
+    if (d->check_bh) {
+        qemu_bh_delete(d->check_bh);
+        d->check_bh = NULL;
+    }
+    if (bus->bh) {
+        qemu_bh_delete(bus->bh);
+        bus->bh = NULL;
+    }
+
+    ide_bus_reset(bus);
+    for (i = 0; i < AHCI_MAX_CMDS; i++) {
+        NCQTransferState *ncq_tfs = &d->ncq_tfs[i];
+
+        if (ncq_tfs->aiocb) {
+            blk_aio_cancel(ncq_tfs->aiocb);
+            ncq_tfs->aiocb = NULL;
+        }
+        if (ncq_tfs->used) {
+            qemu_sglist_destroy(&ncq_tfs->sglist);
+            ncq_tfs->used = false;
+        }
+        ncq_tfs->halt = false;
+    }
+
+    if (ide_state->sg.dev) {
+        qemu_sglist_destroy(&ide_state->sg);
+    }
+    timer_del(ide_state->sector_write_timer);
+    bus->error_status = 0;
+    bus->retry_unit = -1;
+    bus->retry_sector_num = 0;
+    bus->retry_nsector = 0;
+}
+
 static void ahci_reset_port(AHCIState *s, int port)
 {
     AHCIDevice *d = &s->dev[port];
     AHCIPortRegs *pr = &d->port_regs;
     IDEState *ide_state = &d->port.ifs[0];
-    int i;
 
     trace_ahci_reset_port(s, port);
 
-    ide_bus_reset(&d->port);
+    ahci_cancel_port_io(d);
     ide_state->ncq_queues = AHCI_MAX_CMDS;
 
     pr->scr_stat = 0;
@@ -638,36 +678,16 @@ static void ahci_reset_port(AHCIState *s, int port)
     pr->sig = 0xFFFFFFFF;
     pr->cmd_issue = 0;
     d->busy_slot = -1;
+    d->finished = 0;
+    d->cur_cmd = NULL;
+    d->done_first_drq = false;
     d->init_d2h_sent = false;
 
-    ide_state = &s->dev[port].port.ifs[0];
+    d->port_state = STATE_RUN;
     if (!ide_state->blk) {
         return;
     }
 
-    /* reset ncq queue */
-    for (i = 0; i < AHCI_MAX_CMDS; i++) {
-        NCQTransferState *ncq_tfs = &s->dev[port].ncq_tfs[i];
-        ncq_tfs->halt = false;
-        if (!ncq_tfs->used) {
-            continue;
-        }
-
-        if (ncq_tfs->aiocb) {
-            blk_aio_cancel(ncq_tfs->aiocb);
-            ncq_tfs->aiocb = NULL;
-        }
-
-        /* Maybe we just finished the request thanks to blk_aio_cancel() */
-        if (!ncq_tfs->used) {
-            continue;
-        }
-
-        qemu_sglist_destroy(&ncq_tfs->sglist);
-        ncq_tfs->used = 0;
-    }
-
-    s->dev[port].port_state = STATE_RUN;
     if (ide_state->drive_kind == IDE_CD) {
         ahci_set_signature(d, SATA_SIGNATURE_CDROM);
         ide_state->status = SEEK_STAT | WRERR_STAT | READY_STAT;
@@ -678,6 +698,42 @@ static void ahci_reset_port(AHCIState *s, int port)
 
     ide_state->error = 1;
     ahci_init_d2h(d);
+}
+
+void ahci_port_device_changed(AHCIState *s, unsigned port, bool present)
+{
+    AHCIDevice *d;
+    IDEState *ide_state;
+    IDEBus *bus;
+
+    assert(port < s->ports);
+    d = &s->dev[port];
+    ide_state = &d->port.ifs[0];
+    bus = &d->port;
+
+    assert(ide_state->blk);
+    if (!present) {
+        d->port_regs.cmd_issue = 0;
+        if (d->check_bh) {
+            qemu_bh_delete(d->check_bh);
+            d->check_bh = NULL;
+        }
+        if (bus->bh) {
+            qemu_bh_delete(bus->bh);
+            bus->bh = NULL;
+        }
+        bus->error_status = 0;
+
+        /* I/O 回调完成前保留 backend 和 retry 信息。 */
+        blk_drain(ide_state->blk);
+        ahci_cancel_port_io(d);
+        ide_state->blk = NULL;
+    }
+
+    ahci_reset_port(s, port);
+    d->port_regs.scr_err |= PORT_SERR_PHYRDY_CHG | PORT_SERR_DEV_XCHG;
+    d->port_regs.irq_stat |= PORT_IRQ_CONNECT | PORT_IRQ_PHYRDY;
+    ahci_check_irq(s);
 }
 
 /* Buffer pretty output based on a raw FIS structure. */
@@ -1614,10 +1670,14 @@ void ahci_uninit(AHCIState *s)
     for (i = 0; i < s->ports; i++) {
         AHCIDevice *ad = &s->dev[i];
 
+        ahci_cancel_port_io(ad);
+        ahci_unmap_clb_address(ad);
+        ahci_unmap_fis_address(ad);
+        object_unparent(OBJECT(&ad->port));
         for (j = 0; j < 2; j++) {
             ide_exit(&ad->port.ifs[j]);
         }
-        object_unparent(OBJECT(&ad->port));
+        qemu_free_irq(ad->port.irq);
     }
 
     g_free(s->dev);
@@ -1646,9 +1706,11 @@ void ahci_reset(AHCIState *s)
         pr->irq_stat = 0;
         pr->irq_mask = 0;
         pr->scr_ctl = 0;
-        pr->cmd = PORT_CMD_SPIN_UP | PORT_CMD_POWER_ON;
+        pr->cmd = (pr->cmd & PORT_CMD_HPCP) |
+                  PORT_CMD_SPIN_UP | PORT_CMD_POWER_ON;
         ahci_reset_port(s, i);
     }
+    ahci_check_irq(s);
 }
 
 static const VMStateDescription vmstate_ncq_tfs = {
