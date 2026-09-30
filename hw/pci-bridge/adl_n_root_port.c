@@ -126,6 +126,10 @@ static const ADLNRootPortInfo adl_n_root_ports[] = {
         .name = TYPE_ADL_N_PCIE_ROOT_PORT_1D3,
         .device_id = 0x54b3,
         .desc = "Intel Alder Lake-N PCI Express Root Port 00:1d.3",
+    }, {
+        .name = TYPE_ADL_N_PCIE_ROOT_PORT_1D1,
+        .device_id = 0x54b1,
+        .desc = "Intel Alder Lake-N PCI Express Root Port 00:1d.1",
     },
 };
 
@@ -170,6 +174,11 @@ static const TypeInfo adl_n_root_port_types[] = {
         .parent = TYPE_PCIE_ROOT_PORT,
         .class_init = adl_n_root_port_class_init,
         .class_data = &adl_n_root_ports[7],
+    }, {
+        .name = TYPE_ADL_N_PCIE_ROOT_PORT_1D1,
+        .parent = TYPE_PCIE_ROOT_PORT,
+        .class_init = adl_n_root_port_class_init,
+        .class_data = &adl_n_root_ports[8],
     },
 };
 

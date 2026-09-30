@@ -185,6 +185,24 @@ typedef struct {
  * @default_cpus: number of CPUs instantiated if none are specified. Default: 1
  * @is_default:
  *    If true QEMU will use this machine by default if no '-M' option is given.
+ * @no_nic:
+ *    禁止创建隐式网卡，不改变 @default_nic
+ *    或显式网络选项。默认值为 false。
+ * @complete_device_add:
+ *    可选的 -device/device_add 参数补全回调，默认为 NULL。
+ *    在 driver 校验及显式 bus 解析、类型校验后调用，
+ *    早于默认 bus 选择及其余设备添加检查。
+ *    @opts 是调用方持有的可写浅拷贝，只可补充缺失参数。
+ *    必须保留显式值和 driver，不得原地修改共享的 QObject。
+ *    @from_json 为 true 时，新增值须使用原生 JSON 类型；
+ *    否则使用 keyval 字符串。返回后不得持有 @opts
+ *    或指向其中内容的指针。
+ *    @bus 指向已解析的显式总线或 NULL。
+ *    显式总线必须保留；未指定时可选择与 @dc 兼容的总线。
+ *    若仍为 NULL，则按原流程选择默认总线。
+ *    不得创建设备或预留槽位，
+ *    后续检查或实现仍可能失败。
+ *    成功返回 true；失败设置 @errp 并返回 false。
  * @get_hotplug_handler: this function is called during bus-less
  *    device hotplug. If defined it returns pointer to an instance
  *    of HotplugHandler object, which handles hotplug operation
@@ -284,6 +302,7 @@ struct MachineClass {
         no_parallel:1,
         no_floppy:1,
         no_cdrom:1,
+        no_nic:1,
         pci_allow_0_address:1;
     bool auto_create_sdcard;
     bool is_default;
@@ -315,6 +334,9 @@ struct MachineClass {
     SMPCompatProps smp_props;
     const char *default_ram_id;
 
+    bool (*complete_device_add)(MachineState *machine, DeviceClass *dc,
+                                BusState **bus, QDict *opts, bool from_json,
+                                Error **errp);
     HotplugHandler *(*get_hotplug_handler)(MachineState *machine,
                                            DeviceState *dev);
     bool (*hotplug_allowed)(MachineState *state, DeviceState *dev,

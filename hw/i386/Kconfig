@@ -116,6 +116,17 @@ config Q35
     select SMBIOS
     select FW_CFG_DMA
 
+config AZW_ME_PRO_6
+    bool
+    default y
+    depends on Q35
+    select PCIE_PORT
+    select AHCI_ASMEDIA1062
+    select NVME_PCI
+    select IT8613E
+    select USB_XHCI_PCI
+    select USB_STORAGE_CLASSIC
+
 config MICROVM
     bool
     default y

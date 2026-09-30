@@ -13,6 +13,7 @@
 #define TYPE_ADL_N_PCIE_ROOT_PORT_1C3 "adl-n-pcie-root-port-1c3"
 #define TYPE_ADL_N_PCIE_ROOT_PORT_1C6 "adl-n-pcie-root-port-1c6"
 #define TYPE_ADL_N_PCIE_ROOT_PORT_1D0 "adl-n-pcie-root-port-1d0"
+#define TYPE_ADL_N_PCIE_ROOT_PORT_1D1 "adl-n-pcie-root-port-1d1"
 #define TYPE_ADL_N_PCIE_ROOT_PORT_1D2 "adl-n-pcie-root-port-1d2"
 #define TYPE_ADL_N_PCIE_ROOT_PORT_1D3 "adl-n-pcie-root-port-1d3"
 
