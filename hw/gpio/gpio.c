@@ -200,10 +200,6 @@ static void gpio_realize(DeviceState *dev, Error **errp)
                    "%u-byte register", s->size);
         return;
     }
-    if (s->write_mask & ~s->gpio_mask) {
-        error_setg(errp, "write-mask must be a subset of gpio-mask");
-        return;
-    }
 
     section = memory_region_find(get_system_memory(), s->addr, s->size);
     if (section.mr) {

@@ -1354,13 +1354,15 @@ static void qemu_disable_default_devices(void)
     if (!has_defaults || machine_class->no_cdrom) {
         default_cdrom = 0;
     }
+    if (!has_defaults || machine_class->no_nic) {
+        default_net = 0;
+    }
     if (!has_defaults || !machine_class->auto_create_sdcard) {
         auto_create_sdcard = false;
     }
     if (!has_defaults) {
         default_audio = 0;
         default_monitor = 0;
-        default_net = 0;
         default_vga = 0;
     } else {
         if (default_net && machine_class->default_nic &&

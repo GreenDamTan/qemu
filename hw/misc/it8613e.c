@@ -75,6 +75,7 @@ struct IT8613EState {
 
     uint32_t sio_addr;
     uint32_t hwm_addr;
+    uint8_t pme_f4_default;
 
     MemoryRegion sio_io;
     MemoryRegion hwm_io;
@@ -175,7 +176,7 @@ static uint16_t it8613e_rpm_to_fan16(uint32_t rpm)
         return 0xffff;
     }
 
-    val = (1350000ULL + rpm) / (rpm * 2ULL);
+    val = 1350000ULL / (rpm * 2ULL);
     val = MAX(1, MIN(val, 0xfffe));
     return val;
 }
@@ -289,6 +290,7 @@ static void it8613e_reset_registers(IT8613EState *s)
     s->sio_ldn_regs[IT8613E_LDN_PME][IT8613E_SIO_ACT] = 0x01;
     s->sio_ldn_regs[IT8613E_LDN_PME][IT8613E_SIO_BASE] = hwm_base >> 8;
     s->sio_ldn_regs[IT8613E_LDN_PME][IT8613E_SIO_BASE + 1] = hwm_base & 0xff;
+    s->sio_ldn_regs[IT8613E_LDN_PME][0xf4] = s->pme_f4_default;
 
     /*
      * These GPIO defaults expose fan2-fan5 and hide fan1, matching the
@@ -853,6 +855,7 @@ static const Property it8613e_properties[] = {
                        IT8613E_DEFAULT_SIO_ADDR),
     DEFINE_PROP_UINT32("hwm-addr", IT8613EState, hwm_addr,
                        IT8613E_DEFAULT_HWM_ADDR),
+    DEFINE_PROP_UINT8("pme-f4-default", IT8613EState, pme_f4_default, 0),
     DEFINE_IT8613E_PROP_UINT32("fan2", IT8613E_PROP_FAN_RPM, 1, 1000),
     DEFINE_IT8613E_PROP_UINT32("fan3", IT8613E_PROP_FAN_RPM, 2, 1200),
     DEFINE_IT8613E_PROP_UINT32("fan4", IT8613E_PROP_FAN_RPM, 3, 900),

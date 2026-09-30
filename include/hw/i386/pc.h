@@ -69,6 +69,11 @@ typedef struct PCMachineState {
 #define PC_MACHINE_MAX_FW_SIZE      "max-fw-size"
 #define PC_MACHINE_SMBIOS_EP        "smbios-entry-point-type"
 
+typedef struct PCMachineIOReservation {
+    uint16_t base;
+    uint16_t length;
+} PCMachineIOReservation;
+
 /**
  * PCMachineClass:
  *
@@ -90,6 +95,10 @@ struct PCMachineClass {
     bool pci_enabled;
     const char *default_south_bridge;
     bool adl_n_root_ports;
+    hwaddr fixed_mmio_base;
+    hwaddr fixed_mmio_size;
+    const PCMachineIOReservation *fixed_io_ranges;
+    size_t num_fixed_io_ranges;
 
     /* Compat options: */
 

@@ -534,8 +534,12 @@ static void cmos_ioport_write(void *opaque, hwaddr addr,
             check_update_timer(s);
             break;
         case RTC_REG_C:
+            break;
         case RTC_REG_D:
-            /* cannot write to them */
+            if (s->alarm_day_at_reg_d) {
+                s->cmos_data[RTC_REG_D] =
+                    (s->cmos_data[RTC_REG_D] & 0xc0) | (data & 0x3f);
+            }
             break;
         default:
             s->cmos_data[s->cmos_index] = data;
@@ -953,6 +957,8 @@ static const Property mc146818rtc_properties[] = {
     DEFINE_PROP_INT32("base_year", MC146818RtcState, base_year, 1980),
     DEFINE_PROP_UINT16("iobase", MC146818RtcState, io_base, RTC_ISA_BASE),
     DEFINE_PROP_UINT8("irq", MC146818RtcState, isairq, RTC_ISA_IRQ),
+    DEFINE_PROP_BOOL("alarm-day-at-reg-d", MC146818RtcState,
+                     alarm_day_at_reg_d, false),
     DEFINE_PROP_LOSTTICKPOLICY("lost_tick_policy", MC146818RtcState,
                                lost_tick_policy, LOST_TICK_POLICY_DISCARD),
 };

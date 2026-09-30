@@ -1061,6 +1061,10 @@ build_dsdt(GArray *table_data, BIOSLinker *linker,
         crs_range_insert(crs_range_set.mem_ranges,
                          mcfg.base, mcfg.base + mcfg.size - 1);
     }
+    if (pcmc->fixed_mmio_size) {
+        crs_range_insert(crs_range_set.mem_ranges, pcmc->fixed_mmio_base,
+                         pcmc->fixed_mmio_base + pcmc->fixed_mmio_size - 1);
+    }
 
     scope = aml_scope("\\_SB.PCI0");
     /* build PCI0._CRS */
@@ -1071,10 +1075,39 @@ build_dsdt(GArray *table_data, BIOSLinker *linker,
                             0x0000, root_bus_limit + 1));
     aml_append(crs, aml_io(AML_DECODE16, 0x0CF8, 0x0CF8, 0x01, 0x08));
 
-    aml_append(crs,
-        aml_word_io(AML_MIN_FIXED, AML_MAX_FIXED,
-                    AML_POS_DECODE, AML_ENTIRE_RANGE,
-                    0x0000, 0x0000, 0x0CF7, 0x0000, 0x0CF8));
+    if (pcmc->num_fixed_io_ranges) {
+        CrsRangeSet low_io;
+
+        crs_range_set_init(&low_io);
+        for (i = 0; i < pcmc->num_fixed_io_ranges; i++) {
+            const PCMachineIOReservation *r = &pcmc->fixed_io_ranges[i];
+            uint32_t limit = r->base + r->length - 1;
+
+            if (r->base <= 0x0CF7) {
+                crs_range_insert(low_io.io_ranges, r->base,
+                                 MIN(limit, 0x0CF7));
+            }
+            if (limit >= 0x0D00) {
+                crs_range_insert(crs_range_set.io_ranges,
+                                 MAX(r->base, 0x0D00), limit);
+            }
+        }
+        crs_replace_with_free_ranges(low_io.io_ranges, 0, 0x0CF7);
+        for (i = 0; i < low_io.io_ranges->len; i++) {
+            entry = g_ptr_array_index(low_io.io_ranges, i);
+            aml_append(crs,
+                aml_word_io(AML_MIN_FIXED, AML_MAX_FIXED,
+                            AML_POS_DECODE, AML_ENTIRE_RANGE,
+                            0, entry->base, entry->limit,
+                            0, entry->limit - entry->base + 1));
+        }
+        crs_range_set_free(&low_io);
+    } else {
+        aml_append(crs,
+            aml_word_io(AML_MIN_FIXED, AML_MAX_FIXED,
+                        AML_POS_DECODE, AML_ENTIRE_RANGE,
+                        0x0000, 0x0000, 0x0CF7, 0x0000, 0x0CF8));
+    }
 
     crs_replace_with_free_ranges(crs_range_set.io_ranges, 0x0D00, 0xFFFF);
     for (i = 0; i < crs_range_set.io_ranges->len; i++) {

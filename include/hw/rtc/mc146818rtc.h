@@ -27,6 +27,7 @@ struct MC146818RtcState {
     uint8_t cmos_index;
     uint8_t isairq;
     uint16_t io_base;
+    bool alarm_day_at_reg_d;
     int32_t base_year;
     uint64_t base_rtc;
     uint64_t last_update;

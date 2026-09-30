@@ -644,12 +644,14 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
                                         bool from_json, Error **errp)
 {
     ERRP_GUARD();
+    MachineClass *mc = MACHINE_GET_CLASS(current_machine);
     DeviceClass *dc;
     const char *driver, *path;
     char *id;
     DeviceState *dev;
     BusState *bus = NULL;
     QDict *properties;
+    g_autoptr(QDict) completed_opts = NULL;
 
     driver = qdict_get_try_str(opts, "driver");
     if (!driver) {
@@ -675,7 +677,19 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
                        driver, object_get_typename(OBJECT(bus)));
             return NULL;
         }
-    } else if (dc->bus_type != NULL) {
+    }
+
+    if (mc->complete_device_add) {
+        /* 克隆以保持调用方输入不变。 */
+        completed_opts = qdict_clone_shallow(opts);
+        opts = completed_opts;
+        if (!mc->complete_device_add(current_machine, dc, &bus, completed_opts,
+                                     from_json, errp)) {
+            return NULL;
+        }
+    }
+
+    if (bus == NULL && dc->bus_type != NULL) {
         bus = qdev_find_default_bus(dc, errp);
         if (!bus) {
             return NULL;
